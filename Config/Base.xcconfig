@@ -1,0 +1,13 @@
+// Agent Hub build settings shared by every target. Your own values (team, tailnet name, pairing token) live in
+// Config/Local.xcconfig, which scripts/configure.sh writes and git ignores. Never commit Local.xcconfig.
+
+DEVELOPMENT_TEAM =
+CODE_SIGN_STYLE = Automatic
+// Your own reverse-DNS prefix (bundle IDs are unique per Apple ID): scripts/configure.sh writes it to Local.xcconfig.
+AGENTHUB_BUNDLE_PREFIX = io.github.yourname
+AGENTHUB_HOSTS =
+AGENTHUB_PORT = 7860
+AGENTHUB_TOKEN =
+AGENTHUB_MAC_NAME = Mac
+
+#include? "Local.xcconfig"

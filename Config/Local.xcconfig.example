@@ -1,0 +1,7 @@
+// Copy to Config/Local.xcconfig (git-ignored), or let scripts/configure.sh write it.
+DEVELOPMENT_TEAM = ABCDE12345
+AGENTHUB_BUNDLE_PREFIX = io.github.yourname
+AGENTHUB_HOSTS = my-mac.tailnet-name.ts.net,100.64.0.1
+AGENTHUB_PORT = 7860
+AGENTHUB_TOKEN = 64-hex-characters-from-~/.agenthub/token
+AGENTHUB_MAC_NAME = My MacBook

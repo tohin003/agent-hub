@@ -1,0 +1,15 @@
+Agent Hub
+Copyright 2026 Tohin Majumder
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software derived from:
+
+  bloub — https://github.com/jeremy-prt/bloub
+  Copyright (c) 2026 Jérémy Perret. MIT License.
+  The mascot's shape, face and motion (Shared/Mascot/Blob*.swift) are ported from it; the full MIT notice is at the
+  top of those files.
+
+Product names and logos (Claude, Claude Code, Codex, OpenAI, Gemini, Antigravity, OpenCode and others) belong to
+their owners. Agent Hub draws each agent's logo from what that agent's own command-line tool shows on your Mac, and
+is not affiliated with or endorsed by any of them.

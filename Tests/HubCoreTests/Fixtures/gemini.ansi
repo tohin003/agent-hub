@@ -1,0 +1,40 @@
+
+ [38;2;71;150;228m▝[38;2;102;136;217m▜[38;2;132;122;206m▄[38;2;164;113;167m [38;2;195;103;127m [39m    [38;2;255;255;255m▗█▀▀▜▙▝█▛▀▀▌▜██▖▟██▘▜█▘▜██▖▝█▛▝█▛[39m
+ [38;2;71;150;228m [38;2;102;136;217m [38;2;132;122;206m▝[38;2;164;113;167m▜[38;2;195;103;127m▄[39m    [38;2;255;255;255m█▌     █▙▟  ▐█▝█▛▐█ ▐█ ▐█▝█▖█▌ █▌[39m
+ [38;2;71;150;228m [38;2;102;136;217m▗[38;2;132;122;206m▟[38;2;164;113;167m▀[38;2;195;103;127m [39m    [38;2;255;255;255m▜▙ ▝█▛ █▌▝ ▖▐█   ▐█ ▐█ ▐█ ▝██▌ █▌[39m
+ [38;2;71;150;228m▝[38;2;102;136;217m▀[38;2;132;122;206m [38;2;153;116;180m [38;2;174;109;153m [38;2;195;103;127m [39m   [38;2;255;255;255m ▀▀▀▀▘▝▀▀▀▀▘▀▀▘  ▀▀▘▀▀▘▀▀▘ ▝▀▀▝▀▀[39m
+
+ [1m[38;2;255;255;255mGemini CLI[0m[38;2;175;175;175m v0.42.0[39m
+
+
+
+[38;2;255;255;255mTips for getting started:[39m
+[38;2;255;255;255m1. [38;2;175;175;175m/help[38;2;255;255;255m for more information[39m
+[38;2;255;255;255m2. Ask coding questions, edit code or run commands[39m
+[38;2;255;255;255m3. Be specific for the best results[39m
+
+[38;2;255;255;175mℹ Skipping project agents due to untrusted folder. To enable, ensure that the project root is trusted.[39m
+
+[38;2;255;255;175m⚠ [39m [38;2;255;255;175mSkill conflict detected: "agent-reach" from "/Users/person/.agents/skills/agent-reach/SKILL.md" is overriding[39m
+   [38;2;255;255;175mthe same skill from "/Users/person/.gemini/skills/agent-reach/SKILL.md".[39m
+
+ [38;2;255;255;175m╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮[39m
+ [38;2;255;255;175m│[39m                                                                                                          [38;2;255;255;175m│[39m
+ [38;2;255;255;175m│[39m [1m[38;2;255;255;255mDo you trust the files in this folder?[0m                                                                   [38;2;255;255;175m│[39m
+ [38;2;255;255;175m│[39m                                                                                                          [38;2;255;255;175m│[39m
+ [38;2;255;255;175m│[39m [38;2;255;255;255mTrusting a folder allows Gemini CLI to load its local configurations, including custom commands, hooks,[39m  [38;2;255;255;175m│[39m
+ [38;2;255;255;175m│[39m [38;2;255;255;255mMCP servers, agent skills, and settings. These configurations could execute code on your behalf or[39m       [38;2;255;255;175m│[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+

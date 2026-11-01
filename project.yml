@@ -1,0 +1,157 @@
+# XcodeGen spec for Agent Hub. Generate with:  xcodegen generate   (scripts/build-*.sh do it for you)
+# Targets:
+#   AgentHub         the iPhone app (SwiftUI, iOS 26+), signed with your Personal Team, renewed by scripts/renew.sh
+#   AgentHubMac      the Mac hub: a menu bar app the phone connects to over Tailscale (tmux, transcripts, screen)
+#   AgentHubWidgets  the Lock Screen and Dynamic Island Live Activity, embedded in the app
+#   AgentHubTests    unit tests for the hub's readers (transcripts, prompts), run on the Mac
+# Signing and your own values come from Config/Base.xcconfig, which includes the git-ignored Config/Local.xcconfig.
+name: AgentHub
+
+options:
+  bundleIdPrefix: io.github.agenthub
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+
+targets:
+  AgentHub:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: iOS
+        excludes:
+          - "**/Info.plist"
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: AgentHub
+        PRODUCT_BUNDLE_IDENTIFIER: $(AGENTHUB_BUNDLE_PREFIX).AgentHub
+        INFOPLIST_FILE: iOS/App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    dependencies:
+      - target: AgentHubWidgets
+    scheme:
+      gatherCoverageData: false
+
+  # The Lock Screen and Dynamic Island (a Live Activity): drawn here, started and updated by the app.
+  AgentHubWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Widgets
+        excludes:
+          - "Info.plist"
+      - path: iOS/LiveActivity/SessionsActivity.swift
+      # The same blob as in the app, with the agents' logos around it.
+      - path: Shared/Mascot
+      - path: Shared/Terminal
+      - path: Shared/Protocol
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Agent Hub
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_NAME: AgentHubWidgets
+        PRODUCT_BUNDLE_IDENTIFIER: $(AGENTHUB_BUNDLE_PREFIX).AgentHub.Widgets
+        INFOPLIST_FILE: Widgets/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_APPROACHABLE_CONCURRENCY: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+
+  AgentHubMac:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Mac
+        excludes:
+          - "**/Info.plist"
+      - path: Shared
+    dependencies:
+      - sdk: libsqlite3.tbd
+      - sdk: ScreenCaptureKit.framework
+    settings:
+      base:
+        PRODUCT_NAME: Agent Hub
+        PRODUCT_BUNDLE_IDENTIFIER: $(AGENTHUB_BUNDLE_PREFIX).AgentHubMac
+        INFOPLIST_FILE: Mac/App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_APP_SANDBOX: NO
+        COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_IDENTITY: "Apple Development"
+    scheme:
+      gatherCoverageData: false
+      testTargets:
+        - AgentHubTests
+
+  AgentHubTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Tests/HubCoreTests
+        excludes:
+          - "Fixtures/**"
+      - path: Shared/Protocol
+      - path: Mac/Transcripts
+      - path: Mac/Sessions/PaneReader.swift
+      - path: Mac/Sessions/LogoExtractor.swift
+      - path: Mac/Sessions/UsageParsing.swift
+      - path: Mac/Support/HubConfig.swift
+      - path: Mac/Support/Shell.swift
+      - path: Mac/Support/Log.swift
+      - path: Mac/Support/StringExtras.swift
+    dependencies:
+      - sdk: libsqlite3.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(AGENTHUB_BUNDLE_PREFIX).AgentHubTests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO

@@ -1,0 +1,14 @@
+build/
+DerivedData/
+.build/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+xcuserdata/
+.DS_Store
+Config/Local.xcconfig
+*.p12
+*.key
+*.pem
+
+# Local agent tooling (skills, settings)
+.claude/
