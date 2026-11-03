@@ -35,13 +35,22 @@ extension Hub {
             guard hello.protocolVersion == WireProtocol.version else {
                 throw WireError(code: "version", message: "Update Agent Hub on the iPhone or the Mac: they speak different versions.")
             }
-            client.identify(channel: hello.channel == "screen" ? .screen : .control, device: hello.device)
+            let channel: ClientConnection.Channel = switch hello.channel {
+            case "screen": .screen
+            case "audio": .audio
+            default: .control
+            }
+            client.identify(channel: channel, device: hello.device)
             updateDevices()
             Log.info("hub: \(hello.device) connected (\(hello.channel)) from \(client.remote)")
             client.respond(id, HelloResult(hub: hubInfo, accounts: accounts, sessions: sessions?.sessions ?? []))
 
         case Method.ping:
             client.respond(id, OKResult())
+
+        case Method.macClock:
+            // The host clock the picture's and the sound's capture times are on (step 2).
+            client.respond(id, MacClockResult(hostTime: TransportClock.now()))
 
         case Method.sessionsList:
             client.respond(id, sessions?.sessions ?? [])
@@ -69,7 +78,12 @@ extension Hub {
 
         case Method.sessionSend:
             let send = try params(frame, SendParams.self)
-            try await manager().send(send.sessionId, text: send.text, submit: send.submit)
+            try await manager().send(send.sessionId, text: send.text, submit: send.submit, replacingDraft: send.replacingDraft)
+            client.respond(id, OKResult())
+
+        case Method.sessionTakeOverNow:
+            let ref = try params(frame, SessionRef.self)
+            try manager().takeOverNow(ref.sessionId)
             client.respond(id, OKResult())
 
         case Method.sessionKeys:
@@ -126,6 +140,11 @@ extension Hub {
             setScreenSharing(change.enabled)
             client.respond(id, hubInfo)
 
+        case Method.screenPrivacy:
+            let change = try params(frame, ScreenSharingParams.self)
+            try await setPrivacyScreen(change.enabled)
+            client.respond(id, hubInfo)
+
         case "session.restart":
             let ref = try params(frame, SessionRef.self)
             try await manager().restart(ref.sessionId)
@@ -168,9 +187,22 @@ extension Hub {
             guard let account = accounts.first(where: { $0.id == history.accountId }) else {
                 throw WireError.notFound("That account isn't set up on the Mac.")
             }
-            let entries = await Task.detached(priority: .userInitiated) {
+            var entries = await Task.detached(priority: .userInitiated) {
                 TranscriptLocator.history(for: account, limit: max(1, min(history.limit, 200)))
             }.value
+            // Claude Code says which conversations are open outside the hub, and where: those can be taken over.
+            if account.provider == .claude, let running = await sessions?.runningElsewhere(account: account) {
+                for index in entries.indices {
+                    guard let found = running[entries[index].id] else {
+                        entries[index].activeElsewhere = false
+                        continue
+                    }
+                    entries[index].activeElsewhere = true
+                    entries[index].running = RunningElsewhere(kind: found.agent.kind == .background ? .background : .terminal,
+                                                              busy: found.agent.busy, waitingFor: found.agent.waitingFor,
+                                                              app: found.host.app, name: found.agent.name)
+                }
+            }
             client.respond(id, entries)
 
         case Method.historyTimeline:
@@ -200,7 +232,38 @@ extension Hub {
 
         case Method.screenInput:
             let input = try params(frame, ScreenInputParams.self)
-            try InputInjector.perform(input)
+            switch input.action {
+            case .dragStart, .dragMove, .dragEnd:
+                guard InputInjector.trusted else {
+                    throw WireError(code: "accessibility", message: "Allow Agent Hub in System Settings › Privacy & Security › Accessibility to control the Mac.")
+                }
+                let point = InputInjector.point(display: CGDirectDisplayID(input.displayId), x: input.x ?? 0.5, y: input.y ?? 0.5)
+                switch input.action {
+                case .dragStart:
+                    // A pick-up's press waits for the finger to move, so Finder sees a press and a drag together.
+                    mouseDrag.start(at: point, by: client.id,
+                                    how: input.pickedUp.map { $0 ? "picked up by a hold" : "moving" } ?? "an older phone",
+                                    pressOnMove: input.pickedUp == true)
+                case .dragMove: mouseDrag.move(to: point, by: client.id)
+                default: mouseDrag.end(at: point, by: client.id)
+                }
+            default:
+                // A drag still under way (its end got lost) ends before anything else happens.
+                mouseDrag.interrupt()
+                // Right-clicks and double clicks are logged: they're rare, and a double-tap and hold the phone didn't
+                // take for one (a right-click instead of a pick-up) shows in the log beside the drags.
+                switch input.action {
+                case .rightClick:
+                    Log.info("input: a right-click on display \(input.displayId)")
+                case .doubleClick:
+                    Log.info("input: a double click on display \(input.displayId)")
+                case .click where (input.clickCount ?? 1) >= 2:
+                    Log.info("input: a \((input.clickCount ?? 1) == 2 ? "double" : "triple") click on display \(input.displayId)")
+                default:
+                    break
+                }
+                try InputInjector.perform(input)
+            }
             client.respond(id, OKResult())
 
         case Method.screenSpace:
@@ -209,18 +272,24 @@ extension Hub {
                 ScreenService.requestAccessibility()
                 throw WireError(code: "accessibility", message: "Allow Agent Hub in Accessibility to switch Spaces.")
             }
-            let display = CGDirectDisplayID(space.displayId)
             if space.missionControl == true {
                 Spaces.missionControl()
-            } else if let step = space.step {
-                await Spaces.move(display: display, steps: step)
-            } else if let target = space.targetIndex,
-                      let info = Spaces.displays().first(where: { $0.id == space.displayId }),
-                      let current = info.currentSpaceIndex {
-                await Spaces.move(display: display, steps: target - current)
+                try? await Task.sleep(for: .milliseconds(250))
+                client.respond(id, Spaces.displays())
+            } else {
+                // The answer goes once the Mac is there, so the phone's page doesn't go back meanwhile. With the
+                // privacy screen up, the displays also fade to black through the switch (`PrivacyShade`).
+                let (outcome, _) = await curtain.shade.shadedSwitch(
+                    SpaceSwitcher(backend: SystemSpaces()), display: space.displayId, index: space.targetIndex,
+                    steps: space.step, curtainShown: { [weak self] in self?.curtain.isOnScreen ?? true })
+                if let from = outcome.from, let to = outcome.to, from != to {
+                    let ms = Int(outcome.took / .milliseconds(1))
+                    Log.info("spaces: display \(space.displayId) from Space \(from + 1) to \(to + 1): "
+                        + (outcome.reached ? "there in \(ms) ms" : "not there after \(ms) ms"))
+                }
+                screen.spacesChanged(outcome.displays)
+                client.respond(id, outcome.displays)
             }
-            try? await Task.sleep(for: .milliseconds(250))
-            client.respond(id, Spaces.displays())
 
         case Method.screenStart:
             let start = try params(frame, ScreenStartParams.self)
@@ -231,8 +300,42 @@ extension Hub {
             screen.stopWatching(client: client)
             client.respond(id, OKResult())
 
+        case Method.screenFeedback:
+            // Many a second, never answered.
+            screen.feedback(try params(frame, ScreenFeedback.self), from: client)
+
+        case Method.screenViewport:
+            // After a zoom or a pan settles; not answered.
+            screen.viewport(try params(frame, ScreenViewportParams.self), from: client)
+            client.respond(id, OKResult())
+
+        case Method.screenTransport:
+            // The picture (screen connection) or the sound (sound connection) over UDP; no versions turns it off.
+            guard client.channel == .screen || client.channel == .audio else {
+                throw WireError.badRequest("Ask for UDP on a screen or sound connection.")
+            }
+            let ask = try params(frame, ScreenTransportParams.self)
+            if ask.versions.isEmpty {
+                media.end(client)
+                client.respond(id, OKResult())
+            } else {
+                client.respond(id, try await media.negotiate(ask, for: client))
+            }
+
+        case Method.screenAudio:
+            guard client.channel == .audio else {
+                throw WireError.badRequest("Ask for the Mac's sound on a sound connection.")
+            }
+            // Older phones send no parameters: AAC-LC, untimed, as before.
+            let ask = frame.params.flatMap { try? $0.decode(ScreenAudioParams.self) }
+            client.respond(id, try await audio.listen(client: client, ask: ask))
+
         case Method.macStatus:
             client.respond(id, hubInfo)
+
+        case Method.macLevels:
+            let change = try params(frame, MacLevelsParams.self)
+            client.respond(id, try MacLevelsControl.apply(change))
 
         case Method.macRenew:
             try RenewalState.start(repoPath: config.repoPath)

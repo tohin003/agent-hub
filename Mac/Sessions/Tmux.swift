@@ -13,6 +13,8 @@ struct PaneInfo {
     var clients: Int
     var path: String
     var title: String
+    /// The pane's terminal device ("/dev/ttys004"): what an agent inside it reports as its tty.
+    var tty: String = ""
 }
 
 /// Agent Hub's own tmux server (socket "agenthub"), separate from any tmux the person runs, with its own config.
@@ -71,7 +73,7 @@ final class Tmux {
         let format = [
             "#{session_name}", "#{pane_current_command}", "#{pane_pid}", "#{pane_dead}", "#{pane_width}",
             "#{pane_height}", "#{cursor_x}", "#{cursor_y}", "#{session_attached}", "#{pane_current_path}",
-            "#{pane_title}",
+            "#{pane_title}", "#{pane_tty}",
         ].joined(separator: "\u{1F}")
         let result = await run(["list-panes", "-a", "-F", format])
         guard result.ok else { return [] }
@@ -80,7 +82,8 @@ final class Tmux {
             guard f.count >= 11 else { return nil }
             return PaneInfo(session: f[0], command: f[1], pid: Int32(f[2]) ?? 0, dead: f[3] == "1",
                             width: Int(f[4]) ?? 80, height: Int(f[5]) ?? 24, cursorX: Int(f[6]) ?? 0,
-                            cursorY: Int(f[7]) ?? 0, clients: Int(f[8]) ?? 0, path: f[9], title: f[10])
+                            cursorY: Int(f[7]) ?? 0, clients: Int(f[8]) ?? 0, path: f[9], title: f[10],
+                            tty: f.count > 11 ? f[11] : "")
         }
     }
 
@@ -122,6 +125,12 @@ final class Tmux {
     func sendKeys(session: String, keys: [String]) async {
         guard !keys.isEmpty else { return }
         _ = await run(["send-keys", "-t", session] + keys)
+    }
+
+    /// One key pressed `count` times in a single call (tmux's -N), such as Backspace over a whole draft.
+    func sendKey(session: String, key: String, count: Int) async {
+        guard count > 0 else { return }
+        _ = await run(["send-keys", "-t", session, "-N", String(count), key])
     }
 
     func sendLiteral(session: String, text: String) async {

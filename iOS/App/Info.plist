@@ -35,6 +35,8 @@
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>AgentHubHosts</key>
 	<string>$(AGENTHUB_HOSTS)</string>
 	<key>AgentHubPort</key>

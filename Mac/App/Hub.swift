@@ -11,6 +11,12 @@ final class Hub {
     let token: String
     let tailnet = TailnetGuard()
     let screen = ScreenService()
+    /// A phone's live drag (double-tap and drag): the Mac's button never stays down after it.
+    let mouseDrag = MouseDragSession(poster: SystemMousePoster())
+    let audio = AudioService()
+    /// The picture and sound over UDP, for phones that set it up.
+    @ObservationIgnored let media = MediaTransport()
+    @ObservationIgnored let curtain = PrivacyCurtain()
     private(set) var tmux: Tmux?
     private(set) var sessions: SessionManager?
     @ObservationIgnored private(set) var logoService: LogoService?
@@ -42,9 +48,33 @@ final class Hub {
     }
 
     func start() {
+        // A hub that crashed or was killed with the privacy screen up may have left the displays black.
+        if let given = DisplayBlackout.recover(output: SystemDisplayOutput(), markerPath: DisplayBlackout.markerPath), given > 0 {
+            Log.warn("privacy screen: gave back \(given) display(s) that an earlier hub left black")
+        }
         Launcher.installClaudeHooks()
         config = HubConfig.load()
         screen.enabled = config.screenSharing
+        audio.enabled = config.screenSharing
+        media.onStarted = { [weak self] client in
+            if client.channel == .screen { self?.screen.mediaStarted(client) }
+        }
+        media.onEvent = { [weak self] event, client in
+            switch client.channel {
+            case .screen: self?.screen.mediaEvent(event, from: client)
+            case .audio: self?.audio.mediaEvent(event, from: client)
+            case .control, .unknown: break
+            }
+        }
+        media.onEnded = { [weak self] client in
+            switch client.channel {
+            case .screen: self?.screen.mediaEnded(client)
+            case .audio: self?.audio.mediaEnded(client)
+            case .control, .unknown: break
+            }
+        }
+        curtain.onUnlocked = { [weak self] in self?.privacyScreenUnlocked() }
+        curtain.onCovered = { [weak self] in self?.privacyScreenMoved() }
         if config.repoPath == nil, let repo = Bundle.main.object(forInfoDictionaryKey: "AgentHubRepository") as? String,
            !repo.isEmpty, !repo.contains("$(") {
             config.repoPath = repo
@@ -135,6 +165,7 @@ final class Hub {
     private func bind() {
         server?.bind(hosts: tailnet.listenHosts)
         listening = server?.boundHosts ?? []
+        media.listen(on: tailnet.ipv4)
     }
 
     // MARK: Clients
@@ -148,6 +179,9 @@ final class Hub {
         client.onClose = { [weak self] client in
             guard let self else { return }
             self.screen.stopWatching(client: client)
+            self.mouseDrag.clientLeft(client.id)
+            self.audio.stopListening(client: client)
+            self.media.end(client)
             self.clients[client.id] = nil
             self.updateDevices()
             Log.info("hub: \(client.device) (\(client.remote)) disconnected")
@@ -190,7 +224,7 @@ final class Hub {
                 tailscaleName: tailnet.dnsName, tailscaleIP: tailnet.ipv4, port: config.port,
                 screenRecording: ScreenService.screenRecordingAllowed, accessibility: InputInjector.trusted,
                 tmuxPath: tmux?.path, terminalApp: config.terminalApp, renewal: RenewalState.read(),
-                clients: connectedDevices.count, screenSharing: config.screenSharing)
+                clients: connectedDevices.count, screenSharing: config.screenSharing, privacyScreen: curtain.isOn)
     }
 
     // MARK: Settings
@@ -214,8 +248,28 @@ final class Hub {
         config.screenSharing = enabled
         config.save()
         screen.enabled = enabled
+        audio.enabled = enabled
         Log.info("screen: sharing turned \(enabled ? "on" : "off")")
         broadcast(Event.hub, hubInfo)
+    }
+
+    /// Covers the Mac's displays while the phone drives it, or uncovers them.
+    func setPrivacyScreen(_ on: Bool) async throws {
+        if on { try curtain.show() } else { curtain.hide() }
+        // While it's up, the streams leave it out: the phone keeps seeing what's under it.
+        await screen.hide(windows: curtain.windowIDs)
+        broadcast(Event.hub, hubInfo)
+    }
+
+    /// A display came or went, so the privacy screen has new windows: the streams leave those out instead.
+    private func privacyScreenMoved() {
+        Task { await screen.hide(windows: curtain.windowIDs) }
+    }
+
+    private func privacyScreenUnlocked() {
+        broadcast(Event.hub, hubInfo)
+        broadcast(Event.toast, ToastEvent(message: "The privacy screen was unlocked at the Mac.", level: "warning"))
+        Task { await screen.hide(windows: []) }
     }
 
     func setNtfy(_ url: String?) {

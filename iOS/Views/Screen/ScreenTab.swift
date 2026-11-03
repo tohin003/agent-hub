@@ -1,26 +1,49 @@
 import SwiftUI
 
 /// Your Mac's screen, live. Swipe sideways to move between Spaces (each full-screen session window is a Space),
-/// tap to click, touch and hold to right-click, pinch to zoom in on a small button.
+/// tap to click, touch and hold (or tap with two fingers) to right-click, pinch to zoom in on a small button, and
+/// drag the thin bar on the right to scroll. The speaker button holds the Mac's volume and brightness, and plays the
+/// Mac's sound here. Landscape lays the phone on its side for a bigger picture, with every control beside it
+/// (`ScreenStage`); the rest of the app stays upright.
 struct ScreenTab: View {
     var isActive: Bool
     @Environment(HubStore.self) private var store
     @State private var screen = ScreenClient()
     @State private var displays: [DisplayInfo] = []
     @State private var displayId: UInt32?
-    @State private var pageId: UInt64?
-    @State private var programmaticPage = false
+    /// Which Space's page shows, and when the Mac switches (`SpaceFollower`).
+    @State private var follower = SpaceFollower()
+    /// Each Space's latest still, refreshed while it's live, for its page when it isn't.
     @State private var snapshots: [UInt64: UIImage] = [:]
+    /// The still before each Space's latest, and when the latest was taken: a still taken just before the Mac switched
+    /// by itself may already show the next Space.
+    @State private var olderSnapshots: [UInt64: (image: UIImage, taken: ContinuousClock.Instant)] = [:]
     @State private var showingKeyboard = false
     @State private var scrollMode = false
     @State private var zoomed = false
-    @State private var switching = false
+    /// The hub rejected a live drag (it's older than double-tap and drag): drags go as one, from `oneShotDragStart`.
+    @State private var oneShotDrags = false
+    @State private var oneShotDragStart: ScreenInputParams?
     @State private var clicks = 0
     @State private var askToTurnOn = false
     @State private var afterTurningOn: (() -> Void)?
     @State private var turningOn = false
+    @State private var sound = MacAudioClient()
+    @State private var showingControls = false
+    /// The stage has the navigation bar hidden (on its side, with the picture up).
+    @State private var barsHidden = false
+    @AppStorage("screen.playMacSound") private var playSound = false
+    /// Set in the sound sheet; the sync rule follows it (`MediaSync`).
+    @AppStorage("screen.lipSync") private var lipSync = false
+    /// Set in Screen Options; the picture's timing follows it (`VideoFeed.smooth`).
+    @AppStorage("screen.smooth") private var smooth = false
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     private var sharing: Bool { store.screenSharing }
+
+    /// On its side: the picture fills the height and the controls stand beside it.
+    private var landscape: Bool { verticalSizeClass == .compact }
 
     private var display: DisplayInfo? { displays.first { $0.id == displayId } ?? displays.first }
 
@@ -30,12 +53,17 @@ struct ScreenTab: View {
     }
 
     var body: some View {
+        let _ = RenderCount.tick("tab")
         NavigationStack {
             content
                 .navigationTitle(pageTitle)
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar { toolbar }
-                .toolbarVisibility(zoomed ? .hidden : .automatic, for: .tabBar)
+                // Out of the hidden bar while the controls stand beside the picture (`StageHidesBarsKey`).
+                .toolbar {
+                    if !barsHidden { controls.toolbar }
+                }
+                .toolbarVisibility(zoomed || landscape ? .hidden : .automatic, for: .tabBar)
+                .onPreferenceChange(StageHidesBarsKey.self) { hidden in barsHidden = hidden }
         }
         .alert("Turn on the live screen?", isPresented: $askToTurnOn) {
             Button("Turn On") { Task { await turnOn() } }
@@ -49,16 +77,51 @@ struct ScreenTab: View {
                     .presentationDetents([.height(320), .medium])
             }
         }
-        .task(id: isActive && store.isConnected && sharing) {
-            if isActive && store.isConnected && sharing {
+        .sheet(isPresented: $showingControls) {
+            MacControlsSheet(displayId: display?.id, playSound: $playSound, sound: sound, sharing: sharing)
+                .presentationDetents([.medium, .large])
+                .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+        }
+        // In the background the picture pauses; the Mac's sound, if it's on, plays on.
+        .task(id: isActive && store.isConnected && sharing && scenePhase != .background) {
+            if isActive && store.isConnected && sharing && scenePhase != .background {
                 await loadDisplays()
                 await startStream()
             } else {
                 screen.stop()
             }
         }
-        .onChange(of: screen.frames[display?.id ?? 0]) { _, image in
-            if let image, let current = display?.spaces.first(where: \.isCurrent) { snapshots[current.id] = image }
+        .onChange(of: lipSync, initial: true) { _, on in MediaSync.shared.lipSync = on }
+        .onChange(of: smooth, initial: true) { _, on in VideoFeed.smooth = on }
+        .onChange(of: screen.quality) { Task { try? await screen.switchDisplay(display?.id) } }
+        // The hub it reconnects to may be newer: live drags again.
+        .onChange(of: store.isConnected) { oneShotDrags = false }
+        .task(id: isActive && store.isConnected && sharing && playSound) {
+            if isActive && store.isConnected && sharing && playSound, let host = store.connectedHost {
+                sound.start(settings: store.settings, host: host)
+            } else {
+                sound.stop()
+            }
+        }
+        // Whoever switched the Mac's Space (someone at the Mac, or another phone), the page follows.
+        .onChange(of: screen.spacesUpdate) { _, update in
+            if let update { apply(update.displays) }
+        }
+        // The live Space's still, every two seconds, for its page once it isn't live (full-screen apps' too).
+        .task(id: follower.current) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                snapshotLiveSpace()
+            }
+        }
+        // A turn starts the picture over at its whole size, in its new shape.
+        .onChange(of: landscape) { zoomed = false }
+        // The rest of the app stands upright: leaving the tab, or the app, turns it back.
+        .onChange(of: isActive) { _, active in
+            if !active { OrientationLock.shared.standUpright() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { OrientationLock.shared.standUpright() }
         }
         .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.5), trigger: clicks)
     }
@@ -80,7 +143,7 @@ struct ScreenTab: View {
                 .buttonStyle(.glassProminent)
                 .disabled(turningOn)
             }
-        } else if let error = screen.error, screen.frames.isEmpty {
+        } else if let error = screen.error, !screen.hasPicture {
             ContentUnavailableView {
                 Label("Screen Unavailable", systemImage: "display.trianglebadge.exclamationmark")
             } description: {
@@ -93,114 +156,96 @@ struct ScreenTab: View {
                     .buttonStyle(.glassProminent)
             }
         } else if let display {
-            pager(display)
-                .safeAreaBar(edge: .bottom) {
-                    if !zoomed { SpacesBar(spaces: pages, current: pageId, switching: switching, onStep: step, onMissionControl: missionControl) }
-                }
+            // The live numbers are read by the readout alone (`StreamStatsView.live`): read here, every change rebuilt the
+            // whole tab, the Screen Options menu with it, and an open menu then lost the tap under the finger.
+            ScreenStage(landscape: landscape, aspectRatio: display.aspectRatio, zoomed: zoomed, controls: controls,
+                        stats: screen.streaming ? StreamStatsView(stats: StreamStats(), live: { [screen, store] in
+                            (screen.stats, screen.stats.roundTripMs ?? store.client.latency.map { $0 / .milliseconds(1) })
+                        }) : nil,
+                        spaces: SpacesBar(spaces: pages, current: follower.page, switching: follower.switching != nil,
+                                          onStep: step, onMissionControl: missionControl)) {
+                pager(display)
+            }
         } else {
             ProgressView("Looking at your Mac…")
         }
     }
 
     private func pager(_ display: DisplayInfo) -> some View {
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: 0) {
-                ForEach(pages) { space in
-                    let live = space.isCurrent || display.spaces.isEmpty
-                    RemoteScreenView(image: live ? screen.frames[display.id] : (snapshots[space.id] ?? screen.frames[display.id]),
-                                     live: live, displayId: display.id, scrollMode: scrollMode, zoomed: $zoomed) { input in
-                        clicks += 1
-                        Task { await send(input) }
-                    }
-                    .overlay(alignment: .top) {
-                        if !live {
-                            Label("Swipe here to switch the Mac to this Space", systemImage: "hand.draw")
-                                .font(.footnote)
-                                .padding(8)
-                                .glassEffect(.regular, in: .capsule)
-                                .padding(.top, 8)
-                        }
-                    }
-                    .containerRelativeFrame(.horizontal)
-                    .id(space.id)
+        SpacesPager(follower: follower, onSettle: { page in act(follower.settled(on: page)) }) { space in
+            let live = display.spaces.isEmpty || follower.isLive(space.id)
+            let invites = !display.spaces.isEmpty && follower.invitesSwitch(space.id)
+            SpacePage(space: space, live: live, invitesSwitch: invites, snapshot: snapshots[space.id],
+                      feed: screen.feeds[display.id]) {
+                RemoteScreenView(image: live ? screen.frames[display.id] : snapshots[space.id],
+                                 live: live, displayId: display.id, scrollMode: scrollMode, showsRail: !landscape,
+                                 zoomed: $zoomed,
+                                 video: live ? screen.feeds[display.id] : nil,
+                                 displayWidth: display.width,
+                                 onViewport: live ? { visible in screen.setViewport(visible, display: display.id) } : nil,
+                                 dimmed: invites) { input in
+                    if input.action == .click { clicks += 1 }
+                    Task { await send(input) }
                 }
+                // A fresh view when the phone turns, so the zoom starts over in the new shape. (Not when the page comes
+                // live or goes: rebuilt while the pager scrolled, the old picture stayed drawn over the new page. The
+                // picture starts whole again by itself then.)
+                .id(landscape)
             }
-            .scrollTargetLayout()
-        }
-        .scrollTargetBehavior(.paging)
-        .scrollPosition(id: $pageId)
-        .scrollDisabled(zoomed || pages.count < 2)
-        .scrollIndicators(.hidden)
-        .onChange(of: pageId) { old, new in
-            guard old != nil, let new, !programmaticPage else {
-                programmaticPage = false
-                return
-            }
-            guard let target = pages.first(where: { $0.id == new }), !target.isCurrent else { return }
-            Task { await switchSpace(to: target.index) }
         }
     }
 
     private var pageTitle: String {
         guard let display else { return "Screen" }
-        let space = pages.first { $0.id == pageId } ?? pages.first { $0.isCurrent }
+        let space = pages.first { $0.id == follower.page } ?? pages.first { $0.isCurrent }
         if let space, space.isFullscreen, let title = space.title { return title }
         if let space, pages.count > 1 { return "Desktop \(space.index + 1)" }
         return display.name
     }
 
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            if screen.streaming {
-                Label("\(Int(screen.framesPerSecond.rounded())) fps", systemImage: "dot.radiowaves.left.and.right")
-                    .labelStyle(.titleAndIcon)
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button(sharing ? "Turn Off Live Screen" : "Turn On Live Screen",
-                   systemImage: sharing ? "video.fill" : "video.slash") {
-                if sharing {
-                    Task {
-                        screen.stop()
-                        _ = await store.setScreenSharing(false)
-                    }
-                } else {
-                    Task { await turnOn() }
-                }
-            }
-            .tint(sharing ? .red : nil)
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button("Keyboard", systemImage: "keyboard") { whenSharing { showingKeyboard = true } }
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Menu("Screen Options", systemImage: "slider.horizontal.3") {
-                if displays.count > 1 {
-                    Picker("Display", selection: Binding(get: { displayId ?? displays.first?.id ?? 0 }, set: { id in
-                        displayId = id
-                        Task { await startStream() }
-                    })) {
-                        ForEach(displays) { display in
-                            Label(display.name, systemImage: display.isMain ? "display" : "display.2").tag(display.id)
-                        }
-                    }
-                }
-                Picker("Quality", selection: Binding(get: { screen.quality }, set: { quality in
-                    screen.quality = quality
-                    Task { try? await screen.switchDisplay(display?.id) }
-                })) {
-                    ForEach(ScreenClient.Quality.allCases) { quality in Text(quality.title).tag(quality) }
-                }
-                Toggle("Drag to Scroll", systemImage: "scroll", isOn: $scrollMode)
-                Button("Mission Control", systemImage: "rectangle.3.group") { whenSharing { missionControl() } }
-                Button("Refresh Spaces", systemImage: "arrow.clockwise") { whenSharing { Task { await loadDisplays() } } }
-            }
-        }
+    /// The tab's controls, for the navigation bar in portrait and the column beside the picture in landscape.
+    private var controls: ScreenControls {
+        ScreenControls(landscape: landscape, canRotate: OrientationLock.shared.canRotate, sharing: sharing,
+                       privacy: store.privacyScreen, soundPlaying: sound.playing, scrollMode: $scrollMode,
+                       displays: displays,
+                       displayId: Binding(get: { displayId ?? displays.first?.id ?? 0 }, set: { id in
+                           displayId = id
+                           Task { await startStream() }
+                       }),
+                       // A binding SwiftUI can tell is the same from one build to the next (a new Binding(get:set:)
+                       // each time made the open menu update under the finger); the stream follows in onChange.
+                       quality: $screen.quality,
+                       smooth: $smooth,
+                       rotate: rotate,
+                       toggleSharing: toggleSharing,
+                       setPrivacy: { on in Task { await store.setPrivacyScreen(on) } },
+                       showKeyboard: { whenSharing { showingKeyboard = true } },
+                       showSoundAndBrightness: { showingControls = true },
+                       missionControl: { whenSharing { missionControl() } },
+                       refreshSpaces: { whenSharing { Task { await loadDisplays() } } })
     }
 
     // MARK: Actions
+
+    /// On its side, or upright again.
+    private func rotate() {
+        if landscape {
+            OrientationLock.shared.standUpright()
+        } else {
+            OrientationLock.shared.allowLandscape()
+        }
+    }
+
+    private func toggleSharing() {
+        if sharing {
+            Task {
+                screen.stop()
+                _ = await store.setScreenSharing(false)
+            }
+        } else {
+            Task { await turnOn() }
+        }
+    }
 
     /// Runs an action that needs the live screen; while it's off, asks to turn it on first, then carries on.
     private func whenSharing(_ action: @escaping () -> Void) {
@@ -226,14 +271,51 @@ struct ScreenTab: View {
         apply(list)
     }
 
+    /// The Mac's displays and Spaces as they are now: the page follows its current Space (unless a switch the phone
+    /// asked for is on its way).
     private func apply(_ list: [DisplayInfo]) {
         displays = list
         if displayId == nil || !list.contains(where: { $0.id == displayId }) { displayId = list.first?.id }
-        let current = display?.spaces.first(where: \.isCurrent)?.id ?? pages.first?.id
-        if pageId != current {
-            programmaticPage = true
-            withAnimation(.snappy) { pageId = current }
+        // The Mac switched by itself: the still taken in the second before may be mid-slide, so the one before stands.
+        if follower.switching == nil, let left = follower.current, !pages.contains(where: { $0.id == left && $0.isCurrent }),
+           let older = olderSnapshots[left], ContinuousClock.now - older.taken < .seconds(1) {
+            snapshots[left] = older.image
         }
+        act(follower.received(pages))
+    }
+
+    /// Does what the follower says: the pager follows `follower.page` by itself; a switch goes to the Mac.
+    private func act(_ action: SpaceFollower.Action) {
+        guard case let .switchMac(index, _) = action, let display else { return }
+        // The Space being left keeps a still of how it looked; zoomed in, the hub goes back to the whole display once,
+        // now, and the new Space's page starts whole.
+        snapshotLiveSpace()
+        if zoomed {
+            screen.setViewport(nil, display: display.id, immediately: true)
+            zoomed = false
+        }
+        Task {
+            do {
+                let list: [DisplayInfo] = try await store.client.request(Method.screenSpace,
+                                                                         ScreenSpaceParams(displayId: display.id, targetIndex: index),
+                                                                         timeout: .seconds(20))
+                displays = list
+                act(follower.switched(pages))
+            } catch {
+                store.toast = ToastEvent(message: HubClient.describe(error), level: "error")
+                act(follower.switched(nil))
+                await loadDisplays()
+            }
+        }
+    }
+
+    /// A still of the live Space, for its page once it isn't live. Not while a switch is on its way: the picture may
+    /// already be the next Space's.
+    private func snapshotLiveSpace() {
+        guard let display, follower.switching == nil, let current = follower.current,
+              let still = screen.snapshot(display: display.id) else { return }
+        if let previous = snapshots[current] { olderSnapshots[current] = (previous, .now) }
+        snapshots[current] = still
     }
 
     private func startStream() async {
@@ -246,43 +328,51 @@ struct ScreenTab: View {
     }
 
     private func send(_ input: ScreenInputParams) async {
+        let liveDrag = [.dragStart, .dragMove, .dragEnd].contains(input.action)
+        if liveDrag, oneShotDrags {
+            await sendAsOneDrag(input)
+            return
+        }
         do {
             try await store.client.send(Method.screenInput, input)
+        } catch let error as WireError where liveDrag && error.code == WireError.badRequest("").code {
+            // A hub from before live drags: from now on a drag goes as one, when it ends.
+            oneShotDrags = true
+            await sendAsOneDrag(input)
         } catch {
+            // One message for a drag, not one for each move.
+            guard input.action != .dragMove, input.action != .dragEnd else { return }
             store.toast = ToastEvent(message: HubClient.describe(error), level: "error")
         }
     }
 
-    private func switchSpace(to index: Int) async {
-        guard let display else { return }
-        switching = true
-        defer { switching = false }
-        do {
-            let list: [DisplayInfo] = try await store.client.request(Method.screenSpace,
-                                                                     ScreenSpaceParams(displayId: display.id, targetIndex: index),
-                                                                     timeout: .seconds(20))
-            apply(list)
-        } catch {
-            store.toast = ToastEvent(message: HubClient.describe(error), level: "error")
-            await loadDisplays()
+    /// A live drag for a hub that knows only the one-shot drag: its start kept, and one drag from there at its end.
+    private func sendAsOneDrag(_ input: ScreenInputParams) async {
+        switch input.action {
+        case .dragStart:
+            oneShotDragStart = input
+        case .dragEnd:
+            guard let start = oneShotDragStart else { return }
+            oneShotDragStart = nil
+            await send(ScreenInputParams(displayId: input.displayId, action: .drag, x: start.x, y: start.y,
+                                         toX: input.x, toY: input.y))
+        default:
+            break
         }
     }
 
+    /// The Spaces bar: the page goes at once, zoomed in or in Drag to Scroll too, and the Mac follows.
     private func step(_ direction: Int) {
         guard let display else { return }
         if display.spaces.isEmpty {
+            // A Mac whose Spaces can't be listed: the keys, and its word for where it is.
             Task {
-                switching = true
                 let list: [DisplayInfo]? = try? await store.client.request(Method.screenSpace, ScreenSpaceParams(displayId: display.id, step: direction))
                 if let list { apply(list) }
-                switching = false
             }
             return
         }
-        guard let current = pages.firstIndex(where: { $0.id == pageId }) ?? pages.firstIndex(where: \.isCurrent) else { return }
-        let target = min(max(current + direction, 0), pages.count - 1)
-        guard target != current else { return }
-        withAnimation(.snappy) { pageId = pages[target].id }
+        act(follower.step(direction))
     }
 
     private func missionControl() {
@@ -291,49 +381,65 @@ struct ScreenTab: View {
     }
 }
 
-/// The Spaces strip: previous and next, and a dot per Space with the current one filled.
+/// The Spaces strip: previous and next, and a dot per Space with the current one filled. Across the bottom in
+/// portrait; down the margin in landscape, where Mission Control is in Screen Options.
 struct SpacesBar: View {
     var spaces: [SpaceInfo]
     var current: UInt64?
     var switching: Bool
+    var axis: Axis = .horizontal
     var onStep: (Int) -> Void
     var onMissionControl: () -> Void
 
     var body: some View {
+        let stack = axis == .horizontal ? AnyLayout(HStackLayout(spacing: 10)) : AnyLayout(VStackLayout(spacing: 8))
         GlassEffectContainer(spacing: 10) {
-            HStack(spacing: 10) {
+            stack {
                 Button("Previous Space", systemImage: "chevron.left") { onStep(-1) }
                     .labelStyle(.iconOnly)
                     .frame(width: 44, height: 44)
                     .glassEffect(.regular.interactive(), in: .circle)
-                HStack(spacing: 7) {
-                    ForEach(spaces) { space in
-                        Group {
-                            if space.isFullscreen {
-                                RoundedRectangle(cornerRadius: 2).frame(width: 12, height: 8)
-                            } else {
-                                Circle().frame(width: 8, height: 8)
-                            }
-                        }
-                        .foregroundStyle(space.id == current ? Color.primary : Color.secondary.opacity(0.4))
-                    }
-                    if switching { ProgressView().controlSize(.mini) }
-                }
-                .padding(.horizontal, 14)
-                .frame(height: 44)
-                .glassEffect(.regular, in: .capsule)
-                .accessibilityElement()
-                .accessibilityLabel("Space \((spaces.firstIndex { $0.id == current } ?? 0) + 1) of \(spaces.count)")
+                    .accessibilityShowsLargeContentViewer()
+                dots
                 Button("Next Space", systemImage: "chevron.right") { onStep(1) }
                     .labelStyle(.iconOnly)
                     .frame(width: 44, height: 44)
                     .glassEffect(.regular.interactive(), in: .circle)
-                Button("Mission Control", systemImage: "rectangle.3.group", action: onMissionControl)
-                    .labelStyle(.iconOnly)
-                    .frame(width: 44, height: 44)
-                    .glassEffect(.regular.interactive(), in: .circle)
+                    .accessibilityShowsLargeContentViewer()
+                if axis == .horizontal {
+                    Button("Mission Control", systemImage: "rectangle.3.group", action: onMissionControl)
+                        .labelStyle(.iconOnly)
+                        .frame(width: 44, height: 44)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .accessibilityShowsLargeContentViewer()
+                }
             }
         }
-        .padding(.bottom, 8)
+        // The glyphs grow with the text up to what a 44-point circle holds; beyond that the large content viewer
+        // shows them, as in the system's bars.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .padding(.bottom, axis == .horizontal ? 8 : 0)
+    }
+
+    private var dots: some View {
+        let stack = axis == .horizontal ? AnyLayout(HStackLayout(spacing: 7)) : AnyLayout(VStackLayout(spacing: 7))
+        return stack {
+            ForEach(spaces) { space in
+                Group {
+                    if space.isFullscreen {
+                        RoundedRectangle(cornerRadius: 2).frame(width: 12, height: 8)
+                    } else {
+                        Circle().frame(width: 8, height: 8)
+                    }
+                }
+                .foregroundStyle(space.id == current ? Color.primary : Color.secondary.opacity(0.4))
+            }
+            if switching { ProgressView().controlSize(.mini) }
+        }
+        .padding(axis == .horizontal ? .horizontal : .vertical, axis == .horizontal ? 14 : 12)
+        .frame(width: axis == .vertical ? 44 : nil, height: axis == .horizontal ? 44 : nil)
+        .glassEffect(.regular, in: .capsule)
+        .accessibilityElement()
+        .accessibilityLabel("Space \((spaces.firstIndex { $0.id == current } ?? 0) + 1) of \(spaces.count)")
     }
 }

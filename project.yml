@@ -3,7 +3,9 @@
 #   AgentHub         the iPhone app (SwiftUI, iOS 26+), signed with your Personal Team, renewed by scripts/renew.sh
 #   AgentHubMac      the Mac hub: a menu bar app the phone connects to over Tailscale (tmux, transcripts, screen)
 #   AgentHubWidgets  the Lock Screen and Dynamic Island Live Activity, embedded in the app
-#   AgentHubTests    unit tests for the hub's readers (transcripts, prompts), run on the Mac
+#   AgentHubTests    unit tests for the hub's readers (transcripts, prompts) and the UDP media transport, run on the Mac
+#   AgentHubUITests  the Screen tab's gestures, played on a simulator against a debug-only harness
+# Vendor/Opus/Opus.xcframework (libopus, static, linked by the apps and the tests) is built by scripts/build-libopus.sh.
 # Signing and your own values come from Config/Base.xcconfig, which includes the git-ignored Config/Local.xcconfig.
 name: AgentHub
 
@@ -56,8 +58,29 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
     dependencies:
       - target: AgentHubWidgets
+      # libopus (BSD), built by scripts/build-libopus.sh: static, so nothing to embed.
+      - framework: Vendor/Opus/Opus.xcframework
+        embed: false
     scheme:
       gatherCoverageData: false
+      testTargets:
+        - AgentHubUITests
+
+  # The Screen tab's gestures played as a finger plays them, on a debug-only harness (a made-up Mac screen).
+  AgentHubUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: UITests
+    dependencies:
+      - target: AgentHub
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(AGENTHUB_BUNDLE_PREFIX).AgentHubUITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: AgentHub
+        SWIFT_VERSION: "6.0"
 
   # The Lock Screen and Dynamic Island (a Live Activity): drawn here, started and updated by the app.
   AgentHubWidgets:
@@ -109,6 +132,8 @@ targets:
     dependencies:
       - sdk: libsqlite3.tbd
       - sdk: ScreenCaptureKit.framework
+      - framework: Vendor/Opus/Opus.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_NAME: Agent Hub
@@ -136,16 +161,29 @@ targets:
         excludes:
           - "Fixtures/**"
       - path: Shared/Protocol
+      - path: Shared/Audio
+      - path: Shared/Video
+      - path: Shared/Transport
       - path: Mac/Transcripts
       - path: Mac/Sessions/PaneReader.swift
+      - path: Mac/Sessions/RunningAgents.swift
       - path: Mac/Sessions/LogoExtractor.swift
       - path: Mac/Sessions/UsageParsing.swift
+      - path: Mac/Screen/InputInjector.swift
+      - path: Mac/Screen/CurtainInput.swift
+      - path: Mac/Screen/VideoPacing.swift
+      - path: Mac/Screen/FrameRatePolicy.swift
+      - path: Mac/Screen/SpaceSwitcher.swift
+      - path: Mac/Screen/DisplayBlackout.swift
+      - path: Mac/Screen/MouseDrag.swift
       - path: Mac/Support/HubConfig.swift
       - path: Mac/Support/Shell.swift
       - path: Mac/Support/Log.swift
       - path: Mac/Support/StringExtras.swift
     dependencies:
       - sdk: libsqlite3.tbd
+      - framework: Vendor/Opus/Opus.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(AGENTHUB_BUNDLE_PREFIX).AgentHubTests

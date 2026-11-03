@@ -1,12 +1,13 @@
 import Foundation
 import Network
 
-/// One connected phone. A phone opens two of these: "control" (requests, events) and "screen" (JPEG frames), so
-/// large frames never hold up a tap or a keystroke.
+/// One connected phone. A phone opens up to three of these: "control" (requests, events), "screen" (the live picture:
+/// JPEG or video frames, the pointer, keepalive ticks) and "audio" (the Mac's sound), so large frames never hold up a
+/// tap, a keystroke or the sound.
 @MainActor
 final class ClientConnection {
     enum Channel: String {
-        case unknown, control, screen
+        case unknown, control, screen, audio
     }
 
     let id = UUID()
@@ -19,13 +20,39 @@ final class ClientConnection {
     var onFrame: ((ClientConnection, ClientFrame) -> Void)?
     var onClose: ((ClientConnection) -> Void)?
     private var closed = false
+    var isClosed: Bool { closed }
     private var helloTimer: Task<Void, Never>?
 
     // Screen frames: one in flight, the newest waiting; older ones are dropped on a slow link.
     private var frameInFlight = false
     private var pendingFrame: Data?
+    // Video frames and the pointer: every byte handed to the connection counts until the connection has taken it, so
+    // the screen service can tell how far behind the link is.
+    private(set) var screenBacklog = 0
+    /// The part of `screenBacklog` that is keyframes.
+    private(set) var keyframeBacklog = 0
+    /// A screen message left: the backlog went down.
+    var onScreenSent: ((ClientConnection) -> Void)?
+    // Pointer positions: one in flight, the newest waiting.
+    private var pointerInFlight = false
+    private var pendingPointer: Data?
+    /// While the phone watches: fires 20 ms after the last thing sent, for a keepalive tick.
+    private var keepalive: DispatchSourceTimer?
+    // Sound: a few messages may wait (a fraction of a second); past that, a slow link drops sound instead of
+    // falling further behind.
+    private var audioInFlight = 0
+    private static let audioBacklog = 12
     var screenDisplay: UInt32?
     var screenSettings = ScreenStartParams(displayId: nil)
+    /// The phone's UDP session for this connection's picture or sound (`MediaTransport`), once it asked for one.
+    var mediaSession: UDPServerSession?
+    /// The session's phone said hello: the picture (or sound) goes over UDP now, until the session ends.
+    var mediaActive = false
+    /// The session's newest target for the video encoder.
+    var mediaTarget: EncoderTarget?
+
+    /// The UDP session, while it carries this connection's media.
+    var udp: UDPServerSession? { mediaActive ? mediaSession : nil }
 
     init(connection: NWConnection, remote: String) {
         self.connection = connection
@@ -136,6 +163,7 @@ final class ClientConnection {
 
     private func send(_ frame: ServerFrame) {
         guard !closed, let data = try? WireCoding.encoder.encode(frame) else { return }
+        armKeepalive()
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "text", metadata: [metadata])
         connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
@@ -151,6 +179,7 @@ final class ClientConnection {
             return
         }
         frameInFlight = true
+        armKeepalive()
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
         let context = NWConnection.ContentContext(identifier: "frame", metadata: [metadata])
         connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] _ in
@@ -165,11 +194,96 @@ final class ClientConnection {
         })
     }
 
+    /// Sends a binary screen message (a video frame, a pointer shape, a keepalive tick) right away, counting its bytes
+    /// in the backlog until the connection has taken them.
+    func sendScreen(_ data: Data, keyframe: Bool = false) {
+        guard !closed else { return }
+        screenBacklog += data.count
+        if keyframe { keyframeBacklog += data.count }
+        armKeepalive()
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
+        let context = NWConnection.ContentContext(identifier: "screen", metadata: [metadata])
+        connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.screenBacklog -= data.count
+                if keyframe { self.keyframeBacklog -= data.count }
+                self.onScreenSent?(self)
+            }
+        })
+    }
+
+    /// Sends where the pointer is: one position on its way at a time, and only the newest waits behind it.
+    func sendPointer(_ data: Data) {
+        guard !closed else { return }
+        if pointerInFlight {
+            pendingPointer = data
+            return
+        }
+        pointerInFlight = true
+        screenBacklog += data.count
+        armKeepalive()
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
+        let context = NWConnection.ContentContext(identifier: "pointer", metadata: [metadata])
+        connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.screenBacklog -= data.count
+                self.pointerInFlight = false
+                if let next = self.pendingPointer {
+                    self.pendingPointer = nil
+                    self.sendPointer(next)
+                }
+            }
+        })
+    }
+
+    /// While the phone watches, a one-byte tick (`StreamKeepalive`) goes out whenever nothing else did for 20 ms, so
+    /// the iPhone's Wi-Fi never dozes between frames.
+    func startScreenKeepalive() {
+        guard keepalive == nil, !closed else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.sendScreen(StreamKeepalive.message) }
+        }
+        keepalive = timer
+        armKeepalive()
+        timer.resume()
+    }
+
+    func stopScreenKeepalive() {
+        keepalive?.cancel()
+        keepalive = nil
+    }
+
+    private static let keepaliveInterval = DispatchTimeInterval.milliseconds(20)
+
+    /// Something went out: the next tick is due 20 ms from now.
+    private func armKeepalive() {
+        keepalive?.schedule(deadline: .now() + Self.keepaliveInterval, repeating: .never, leeway: .milliseconds(2))
+    }
+
+    /// Sends a sound message, unless the link is already that far behind.
+    func sendAudio(_ data: Data) {
+        guard !closed, audioInFlight < Self.audioBacklog else { return }
+        audioInFlight += 1
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
+        let context = NWConnection.ContentContext(identifier: "sound", metadata: [metadata])
+        connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] _ in
+            MainActor.assumeIsolated { self?.audioInFlight -= 1 }
+        })
+    }
+
     func close() {
         guard !closed else { return }
         closed = true
         helloTimer?.cancel()
+        stopScreenKeepalive()
         connection.cancel()
         onClose?(self)
+        // After the services let go of it: a session nobody watches any more.
+        mediaSession?.close()
+        mediaSession = nil
+        mediaActive = false
     }
 }

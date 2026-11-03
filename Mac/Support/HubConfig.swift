@@ -12,6 +12,8 @@ enum HubPaths {
     static let attach = "\(root)/attach"
     static let launch = "\(root)/launch"
     static let uploads = "\(root)/uploads"
+    /// Where the hub runs agents for itself (logos, model lists, session lists): never anyone's work.
+    static let probe = "\(root)/probe"
     static let bin = "\(root)/bin"
     static let hookScript = "\(root)/bin/agenthub-hook"
     static let claudeSettings = "\(root)/claude-hooks.json"

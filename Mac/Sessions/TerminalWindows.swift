@@ -67,8 +67,95 @@ final class TerminalWindows {
         _ = await Shell.run(tmux.path, ["-L", Tmux.socket, "detach-client", "-s", session], environment: Tmux.environment, timeout: 5)
     }
 
+    /// Shows a session that moved here from a terminal tab in that same tab (`tty`), so the window carries on.
+    /// For Terminal, a tiny script run inside Terminal (no Automation permission, as for the hub's own windows) types
+    /// the attach command into the tab's shell, then closes its own window; leaving the session later returns the
+    /// tab to that shell. Other apps can't be typed into: their tab gets a note saying where the session went.
+    func reattach(session: String, title: String, tty: String, app: String?) async {
+        let attachPath = "\(HubPaths.attach)/\(session).command"
+        guard app == "Terminal" else {
+            note(tty, "Agent Hub: this conversation continues in Agent Hub. To show it here: "
+                 + "\(Shell.quote(tmux.path)) -L \(Tmux.socket) attach -t \(session)")
+            return
+        }
+        let helperPath = "\(HubPaths.attach)/\(session)-here.command"
+        do {
+            try script(session: session, title: title).write(toFile: attachPath, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: attachPath)
+            try helper(tty: tty, attachPath: attachPath).write(toFile: helperPath, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath)
+        } catch {
+            Log.error("windows: couldn't write the scripts to show \(session) in \(tty): \(error)")
+            return
+        }
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        do {
+            _ = try await NSWorkspace.shared.open([URL(fileURLWithPath: helperPath)], withApplicationAt: appURL,
+                                                  configuration: configuration)
+        } catch {
+            Log.error("windows: Terminal didn't run the script to show \(session) in \(tty): \(error)")
+            return
+        }
+        for _ in 0..<40 {
+            try? await Task.sleep(for: .milliseconds(150))
+            if await hasClient(session) {
+                Log.info("windows: \(session) shows in the tab it moved from (\(tty))")
+                return
+            }
+        }
+        Log.warn("windows: the tab \(tty) didn't attach to \(session)")
+    }
+
+    /// Prints a dim line into a terminal tab (its screen, not its input).
+    private func note(_ tty: String, _ text: String) {
+        guard tty.hasPrefix("/dev/tty"), let handle = FileHandle(forWritingAtPath: tty) else { return }
+        defer { try? handle.close() }
+        try? handle.write(contentsOf: Data("\r\n\u{1B}[2m\(text)\u{1B}[0m\r\n".utf8))
+    }
+
+    /// Run in a window of its own: types the attach command into the tab showing `tty`, then closes that window.
+    private func helper(tty: String, attachPath: String) -> String {
+        func appleScriptString(_ text: String) -> String {
+            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        // A leading space keeps it out of the shell's history where that's set up.
+        let command = " /bin/zsh \(Shell.quote(attachPath)) here"
+        return """
+        #!/bin/zsh
+        # Agent Hub: shows a session in the Terminal tab it moved from (\(tty)), then closes this window.
+        /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1
+        tell application id "\(bundleID)"
+          repeat with w in windows
+            repeat with t in tabs of w
+              if tty of t is \(appleScriptString(tty)) then
+                do script \(appleScriptString(command)) in t
+                return
+              end if
+            end repeat
+          end repeat
+        end tell
+        APPLESCRIPT
+        TTY=$(/usr/bin/tty)
+        /bin/rm -f "$0"
+        ( /bin/sleep 0.3
+          /usr/bin/osascript -e "tell application id \\"\(bundleID)\\"
+            repeat with w in windows
+              if tty of selected tab of w is \\"$TTY\\" then
+                close w
+                exit repeat
+              end if
+            end repeat
+          end tell" >/dev/null 2>&1 ) &!
+        exit 0
+        """
+    }
+
     // MARK: The window's script
 
+    /// The script a window runs. Run with "here" (in a tab a session moved from), leaving the session returns the tab
+    /// to its shell instead of closing the window.
     private func script(session: String, title: String) -> String {
         let label = "\(session) · \(title)"
         return """
@@ -105,6 +192,8 @@ final class TerminalWindows {
         watcher=$!
         \(Shell.quote(tmux.path)) -L \(Tmux.socket) attach-session -t "$S"
         kill $watcher 2>/dev/null
+        # In a tab the session moved from: back to that tab's own shell.
+        [ "$1" = here ] && exit 0
         # Detached by the hub, or the session ended: close this window once the shell has exited.
         ( /bin/sleep 0.4; own_window 'close w' ) &!
         exit 0

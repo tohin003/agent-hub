@@ -16,6 +16,9 @@ struct MacTab: View {
             List {
                 header
                 connection
+                if store.isConnected {
+                    MacLevelsSection(title: "Sound & Brightness", displayId: nil)
+                }
                 permissions
                 accounts
                 signing

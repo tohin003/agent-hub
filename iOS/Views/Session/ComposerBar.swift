@@ -18,6 +18,8 @@ struct ComposerBar: View {
     @State private var sent = 0
     /// Briefly after sending, Send stays where Stop would appear.
     @State private var justSent = false
+    /// The Mac's own draft this box shows, until you change it.
+    @State private var mirrored: String?
     @FocusState private var focused: Bool
 
     private var working: Bool { model.session.state == .working }
@@ -29,9 +31,22 @@ struct ComposerBar: View {
                 suggestionList
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            if let mirrored, text == mirrored {
+                Label("Typed on the Mac", systemImage: "desktopcomputer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 64)
+                    .transition(.opacity)
+                    .accessibilityLabel("The message box shows what's typed on the Mac")
+            }
             composer
         }
         .animation(.snappy, value: suggestions.isEmpty)
+        .animation(.snappy, value: mirrored)
+        .onAppear { mirror(model.session.draft) }
+        .onChange(of: model.session.draft) { _, draft in mirror(draft) }
+        .onChange(of: justSent) { _, recent in if !recent { mirror(model.session.draft) } }
         .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.5), trigger: sent)
         .photosPicker(isPresented: $choosingPhoto, selection: $photo, matching: .images)
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.item]) { result in
@@ -176,13 +191,29 @@ struct ComposerBar: View {
         return "Message \(model.account?.name ?? "the agent")"
     }
 
+    /// What's typed in the agent's message box on the Mac (a message the agent handed back to edit, or words typed
+    /// there) shows here while this box is empty or still shows the last one; what you type is never replaced.
+    private func mirror(_ draft: String?) {
+        guard !sending, !justSent else { return }
+        if let draft {
+            guard text.isEmpty || text == mirrored, text != draft else { return }
+            text = draft
+            mirrored = draft
+        } else if let shown = mirrored {
+            if text == shown { text = "" }
+            mirrored = nil
+        }
+    }
+
     private func send() async {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
         sending = true
-        if await model.send(message) {
+        // The Mac's draft goes with it: the message replaces it there (unchanged, it's sent as it is).
+        if await model.send(message, replacingDraft: model.session.draft) {
             justSent = true
             text = ""
+            mirrored = nil
             sent += 1
             Task {
                 try? await Task.sleep(for: .seconds(1.2))

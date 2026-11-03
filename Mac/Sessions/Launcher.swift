@@ -110,13 +110,36 @@ enum Launcher {
         \(commandLine.isEmpty ? ": # a plain shell" : commandLine)
         exec zsh -l
         """
+        let (scriptPath, tmuxCommand) = try write(script, sessionId: sessionId)
+        return Plan(scriptPath: scriptPath, tmuxCommand: tmuxCommand, agentSessionId: agentSessionId,
+                    commandLine: commandLine)
+    }
+
+    /// Shows one of Claude Code's background sessions as it runs (`claude-w attach <id>`, typed as the person would).
+    /// When the hub lets go, the session carries on in Claude Code's background service.
+    static func attachPlan(sessionId: String, account: Account, cwd: String, shortId: String, conversation: String,
+                           title: String) throws -> Plan {
+        let commandLine = "\(account.command) attach \(Shell.quote(shortId))"
+        let script = """
+        # Agent Hub session \(sessionId): \(account.name)'s background session \(shortId) in \(cwd)
+        # Opened by the Agent Hub app. Leaving it leaves the session running in Claude Code's background service.
+        cd -- \(Shell.quote(cwd)) 2>/dev/null || cd
+        export AGENTHUB_SESSION=\(Shell.quote(sessionId))
+        export AGENTHUB_TITLE=\(Shell.quote(title))
+        \(commandLine)
+        exec zsh -l
+        """
+        let (scriptPath, tmuxCommand) = try write(script, sessionId: sessionId)
+        return Plan(scriptPath: scriptPath, tmuxCommand: tmuxCommand, agentSessionId: conversation, commandLine: commandLine)
+    }
+
+    /// Saves a session's script; tmux runs it in the person's interactive login shell.
+    private static func write(_ script: String, sessionId: String) throws -> (path: String, tmuxCommand: String) {
         let scriptPath = "\(HubPaths.launch)/\(sessionId).zsh"
         try script.write(toFile: scriptPath, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptPath)
         let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { $0.hasSuffix("zsh") ? $0 : nil } ?? "/bin/zsh"
-        let tmuxCommand = "exec \(shell) -l -i \(Shell.quote(scriptPath))"
-        return Plan(scriptPath: scriptPath, tmuxCommand: tmuxCommand, agentSessionId: agentSessionId,
-                    commandLine: commandLine)
+        return (scriptPath, "exec \(shell) -l -i \(Shell.quote(scriptPath))")
     }
 
     /// Claude Code settings loaded only by sessions the hub starts (`--settings`): a SessionStart hook that tells

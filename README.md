@@ -43,7 +43,7 @@ where they belong, and a small mascot that lives in the app, the Mac menu bar, t
 | **Chat, like Claude's app** | The agent's own words stand out; its tools are quiet grey lines (*Ran tests*, *Edit Hero.tsx +38 −21*) that open to show the command, output or diff. To-do lists, plans, thinking, subagents and background shells, read live from the agent's own conversation file. |
 | **Approvals from anywhere** | When an agent asks, its exact options appear as buttons: permission prompts, questions with several answers or your own words, checklists, sliders, trust dialogs, model pickers. The hub only answers while that same question is still on the Mac's screen. |
 | **The real terminal** | Each session runs in tmux in its own full-screen Terminal window on the Mac; the app mirrors the exact screen, colours and all, with Mac keys (⌃C, ⇧⇥, esc) and pinch to zoom. |
-| **Your Mac's screen** | A live view of the Mac: swipe between Spaces, tap to click, pinch to zoom on a small button. For the "Allow" dialogs agents trigger. Switch it off when you don't need it. |
+| **Your Mac's screen** | A live view of the Mac, as hardware video (HEVC, or H.264) at up to the display's refresh rate (60 frames a second, 120 on a ProMotion Mac): only what changes is sent, coloured text stays sharp (4:4:4) when your iPhone can decode it, and the phone draws the Mac's pointer itself (never under 18 points tall), so it moves at once. The frame rate follows the link and how much of the screen moves (60 from 6 Mbit/s, 45 to 30 from 3, 30 to 20 below), so on a slow link motion gets choppier before text gets blurry, and once the screen stops moving the Mac sends it again a few times until still text is crisp. Swipe between Spaces, tap to click (twice to double-click), double-tap and drag to drag as with a mouse (move a file or a window, select text; or double-tap and hold half a second, until the ring fills and the phone taps, then drag), touch and hold or tap with two fingers to right-click, pinch to zoom on a small button (watching alone, once the zoom settles the Mac sends just that part at its full Retina resolution, so zoomed text is crisp), and drag the thin bar on the right to scroll. **Landscape** lays the tab on its side: the picture fills the screen and every control stands beside it (there, Drag to Scroll scrolls). Inside Tailscale the picture and the Mac's sound travel as UDP when both ends can: every frame is paced, protected by error correction and resent when a piece goes missing, the bitrate follows what the link carries, and the Mac's sound comes as Opus in 10 ms frames that are rebuilt or concealed when one is lost. Where UDP can't get through, everything goes over the WebSocket as before, the sound as AAC-ELD (10 ms packets, 5 ms of codec delay). Picture and sound carry their capture time on the Mac's clock, which the phone tracks, so it knows how far behind the Mac each one is. The phone holds just enough sound for the jitter it measures (20–40 ms at home, more through relays) and keeps it there by playing up to 2% faster or slower, never by dropping sound or adding silence; the sound is never ahead of the picture. **Lip-Sync** (in the speaker sheet) holds the picture back to meet slower sound, such as AirPods'; off, the picture is never held back (the lowest delay). **Smooth Motion** (in Screen Options) shows frames at an even pace instead of as they arrive, about a refresh later; with Lip-Sync, the larger of the two holds applies. A line under the bar shows the frame rate (as 24/30 fps while the link holds it down), the round trip, the picture's delay from the Mac's screen to yours, the data rate, the codec and the way it came (Direct, Relay or DERP over UDP, or TCP). Use it for the "Allow" dialogs agents trigger, and switch it off when you don't need it. The privacy screen blacks out the Mac's own displays while you drive it, through Space switches, Mission Control and full-screen animations too (a display that can't be blacked out, such as AirPlay, keeps a covering message), and holds back its own mouse and keyboard; your phone keeps a live view of everything under it. At the Mac, any key shows the unlock panel, and Touch ID or the password takes it down. The speaker button sets the Mac's volume and brightness, and can play the Mac's sound on the phone, even while the Mac is muted (and on with the phone locked). |
 | **Usage, models and effort** | A ring shows how full the context window is; tap it for plan limits (*Current session 38%, resets 10:30 pm*). Pick the model and effort for a session from the agent's own list. |
 | **Lock Screen and Dynamic Island** | A Live Activity with the session that needs you, or the one at work with a live timer. |
 | **Notifications your way** | A soft chime, a vibration only, or silence. On the Lock Screen, the agent's own answers are buttons, behind Face ID. |
@@ -66,10 +66,12 @@ CLI and it shows up with its own logo.
  │ Sessions · Chat · Terminal       │ ◀──── ws://mac:7860 ───▶ │ WebSocket server: tailnet + localhost only,     │
  │ Approvals · Usage · Models       │   pairing token, same    │ pairing token, same tailnet user                │
  │ Screen (Spaces, tap to click)    │   tailnet user           │ tmux: one session per agent, in your own shell  │
- │ Lock Screen · Dynamic Island     │                          │  └─ a full-screen Terminal window each          │
+ │ Lock Screen · Dynamic Island     │ ◀── UDP: video, sound ─▶ │  └─ a full-screen Terminal window each          │
  └──────────────────────────────────┘                          │ Readers: Claude JSONL, Codex rollouts, OpenCode │
                                                                │ SQLite, and the screen itself (prompts, logos)  │
-                                                               │ ScreenCaptureKit stream, CGEvent input          │
+                                                               │ ScreenCaptureKit → HEVC video, CGEvent input    │
+                                                               │ UDP: paced video and Opus, FEC, resends, rate   │
+                                                               │ control, Tailscale path (direct, relay, DERP)   │
                                                                └────────────────────────────────────────────────┘
 ```
 
@@ -130,10 +132,12 @@ scripts/install.sh --prefix io.github.<your-name>
 
 **System Settings › Privacy & Security**, and allow **Agent Hub** in:
 
-- **Screen & System Audio Recording**: for the live screen.
-- **Accessibility**: taps and typing on the live screen, switching Spaces, full-screen session windows.
+- **Screen & System Audio Recording**: for the live screen and the Mac's sound on the phone.
+- **Accessibility**: taps and typing on the live screen, switching Spaces, the privacy screen, full-screen session windows.
+- **Full Disk Access** (optional): lets agents open files you drag into a session's Terminal window, such as a
+  screenshot's floating thumbnail. Agents in hub sessions read files with Agent Hub's permissions, not Terminal's.
 
-The app's Mac tab has **Allow** buttons that open the right place.
+The app's Mac tab has **Allow** buttons for the first two that open the right place.
 
 ### 5. Open the app on your iPhone
 
@@ -147,6 +151,9 @@ Your phone can't connect? See [Troubleshooting](#troubleshooting).
 
 - **Start a session:** **+** › an agent › a folder. It opens in its own full-screen Terminal window on the Mac.
 - **Continue a conversation:** Sessions › an account › History. It reopens in the same folder, with the same mode and model.
+  A Claude Code session that's still running on the Mac is continued, not copied: one in Claude's background service
+  (`claude --bg`) opens as it runs, and one in a Terminal tab moves into Agent Hub once its turn ends, with that same tab
+  showing it.
 - **Answer the agent:** the question appears above the message box with the agent's own options. Checklists toggle;
   "Type something" options take your own words; ◀ ▶ sliders move.
 - **Type to it:** the message box types into the agent's terminal. Type `/` for the agent's own slash commands.
@@ -175,7 +182,9 @@ A free Apple ID signs apps for **7 days**. The Mac takes care of it:
 
 ## Security
 
-- The hub listens only on the Mac's **tailnet address and localhost**: never on your LAN or the internet.
+- The hub listens only on the Mac's **tailnet address and localhost**: never on your LAN or the internet. Its UDP
+  socket for the picture and sound is on the tailnet address only; each phone's session gets a fresh key over the
+  authenticated WebSocket, and every packet is sealed (ChaCha20-Poly1305) and can't be replayed.
 - Every connection must present the **pairing token** (`~/.agenthub/token`, owner-only; on the phone, in the Keychain),
   compared in constant time, and tailnet peers must be signed in as **the same person** as the Mac (`tailscale whois`).
 - Traffic is end-to-end encrypted by Tailscale (WireGuard).
@@ -196,6 +205,9 @@ To rotate the token: delete `~/.agenthub/token`, restart the hub, then `scripts/
 - **"Untrusted Developer" on the iPhone.** Settings › General › VPN & Device Management › your Apple ID › Trust.
 - **Session windows aren't full screen, or taps on the live screen don't work.** Allow Accessibility for Agent Hub.
 - **No screen.** Allow Screen & System Audio Recording, reopen the Screen tab, and check the Live Screen switch.
+- **A screenshot dragged into a session's window doesn't attach.** Allow Full Disk Access for Agent Hub: the agent
+  reads files with Agent Hub's permissions, and the floating thumbnail's file sits in a folder only Full Disk Access
+  opens.
 - **A question isn't shown as buttons.** The Terminal view always shows it, and its keys (▲ ▼ ⏎ esc 1 2 3) answer it.
 - **An account is missing.** Agent Hub finds CLIs on your PATH, and shell functions or aliases named after an agent with
   a suffix (`claude-work() { CLAUDE_CONFIG_DIR=~/.claude-work claude "$@"; }`). You can also add one to
@@ -205,7 +217,7 @@ To rotate the token: delete `~/.agenthub/token`, restart the hub, then `scripts/
 
 ```sh
 xcodegen generate                         # AgentHub.xcodeproj from project.yml
-xcodebuild -scheme AgentHubMac test       # the hub and its readers (60+ tests, many from real captured screens)
+xcodebuild -scheme AgentHubMac test       # the hub, its readers, the video path and the UDP transport (200+ tests)
 scripts/install-mac.sh                    # rebuild and restart the hub
 scripts/renew.sh --from-tree              # rebuild and reinstall the iPhone app
 scripts/screenshots.sh                    # the screenshots above, from made-up sessions, in a simulator
@@ -216,10 +228,11 @@ scripts/screenshots.sh                    # the screenshots above, from made-up 
 | `iOS/` | The iPhone app (Swift 6, MainActor by default): model, design, views, Live Activity. |
 | `Widgets/` | The Lock Screen and Dynamic Island Live Activity (an app extension). |
 | `Mac/` | The hub: WebSocket server, sessions and tmux, prompt reading, transcript readers, screen streaming, menu bar. |
-| `Shared/` | The wire protocol, the mascot and the terminal-art renderer, compiled into both apps. |
-| `Tests/` | Swift Testing tests for the readers. |
+| `Shared/` | The wire protocol, the UDP media transport, the video encoder and decoder, the sound codecs (AAC-LC, AAC-ELD, Opus) and their timing (the Mac's clock, the sound buffer, the sync rule), the mascot and the terminal-art renderer, compiled into both apps. |
+| `Tests/` | Swift Testing tests for the readers, the video path and the transport: a network emulator in simulated time, and real sockets through a lossy relay. |
 | `Tools/` | The icon and screenshot-data generators. |
-| `scripts/` | Configure, install, renew, icons, screenshots, uninstall. |
+| `scripts/` | Configure, install, renew, icons, screenshots, uninstall, and the libopus build (`build-libopus.sh`). |
+| `Vendor/` | libopus (BSD), built as `Opus.xcframework` by `scripts/build-libopus.sh`. |
 
 Contributions are welcome. [`AGENTS.md`](AGENTS.md) has the rules, for people and AI agents alike: derive, don't
 hard-code; never touch the person's own agent settings; Apple's Human Interface Guidelines for the UI.
@@ -232,8 +245,8 @@ hard-code; never touch the person's own agent settings; Apple's Human Interface 
 
 - The mascot's shape, face and motion are ported from [**bloub**](https://github.com/jeremy-prt/bloub) by Jérémy Perret
   (MIT).
-- Built with SwiftUI, Network.framework, ScreenCaptureKit, ActivityKit and [tmux](https://github.com/tmux/tmux);
-  connected by [Tailscale](https://tailscale.com).
+- Built with SwiftUI, Network.framework, ScreenCaptureKit, ActivityKit, [tmux](https://github.com/tmux/tmux) and
+  [Opus](https://opus-codec.org) (BSD); connected by [Tailscale](https://tailscale.com).
 - Product names and logos belong to their owners. Agent Hub draws each agent's logo from what its own CLI shows on your
   Mac, and is not affiliated with Anthropic, OpenAI, Google, OpenCode or any other agent's maker.
 

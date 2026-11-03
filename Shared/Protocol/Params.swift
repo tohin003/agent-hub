@@ -4,7 +4,7 @@ import Foundation
 
 nonisolated public struct HelloParams: Codable, Sendable {
     public var protocolVersion: Int
-    /// "control" for the main connection, "screen" for the screen stream.
+    /// "control" for the main connection, "screen" for the screen stream, "audio" for the Mac's sound.
     public var channel: String
     public var device: String
 
@@ -41,10 +41,13 @@ nonisolated public struct CreateSessionParams: Codable, Sendable {
     public var title: String?
     public var openWindow: Bool
     public var fullScreen: Bool
+    /// With `resumeId`, for a conversation that's open elsewhere on the Mac (`HistoryEntry.running`): continue that
+    /// very session instead of starting a copy.
+    public var takeOver: TakeOver?
 
     public init(accountId: String, cwd: String, prompt: String? = nil, resumeId: String? = nil, mode: String? = nil,
                 model: String? = nil, effort: String? = nil, fork: Bool? = nil, title: String? = nil,
-                openWindow: Bool = true, fullScreen: Bool = true) {
+                openWindow: Bool = true, fullScreen: Bool = true, takeOver: TakeOver? = nil) {
         self.accountId = accountId
         self.cwd = cwd
         self.prompt = prompt
@@ -56,7 +59,17 @@ nonisolated public struct CreateSessionParams: Codable, Sendable {
         self.title = title
         self.openWindow = openWindow
         self.fullScreen = fullScreen
+        self.takeOver = takeOver
     }
+}
+
+/// When to take over a conversation that's open elsewhere on the Mac. A session in Claude's background service is
+/// opened as it runs either way; one in a terminal tab moves into Agent Hub (its tab keeps showing it).
+nonisolated public enum TakeOver: String, Codable, Sendable {
+    /// Once the agent has finished the turn it's working on.
+    case whenIdle
+    /// Right away, stopping the turn it's working on.
+    case now
 }
 
 nonisolated public struct SessionRef: Codable, Sendable {
@@ -92,11 +105,15 @@ nonisolated public struct SendParams: Codable, Sendable {
     public var text: String
     /// Press Return after the text.
     public var submit: Bool
+    /// The Mac's own draft as the phone last saw it (`SessionInfo.draft`). The text replaces that draft rather than
+    /// joining it, and sending it unchanged only presses Return, so it goes exactly as the agent holds it.
+    public var replacingDraft: String?
 
-    public init(sessionId: String, text: String, submit: Bool = true) {
+    public init(sessionId: String, text: String, submit: Bool = true, replacingDraft: String? = nil) {
         self.sessionId = sessionId
         self.text = text
         self.submit = submit
+        self.replacingDraft = replacingDraft
     }
 }
 
@@ -344,6 +361,9 @@ nonisolated public struct FSMkdirParams: Codable, Sendable {
 nonisolated public struct ScreenInputParams: Codable, Sendable {
     public enum Action: String, Codable, Sendable {
         case click, doubleClick, rightClick, move, drag, scroll, type, key
+        /// A live drag (double-tap and drag on the phone): the button down at `x`, `y`; the pointer to each move's;
+        /// the button up at the end's. An older hub rejects them, and the phone then sends one `drag` at the end.
+        case dragStart, dragMove, dragEnd
     }
 
     public var displayId: UInt32
@@ -362,10 +382,17 @@ nonisolated public struct ScreenInputParams: Codable, Sendable {
     public var key: String?
     /// "cmd", "shift", "option", "control".
     public var modifiers: [String]?
+    /// For a click: which click of a run this is. 2 is the second click of a double click, sent as a mouse sends it.
+    public var clickCount: Int?
+    /// A live drag's start: whether a still hold picked it up (false: the finger moved first). Only for the hub's log;
+    /// nil from an older phone.
+    public var pickedUp: Bool?
 
     public init(displayId: UInt32, action: Action, x: Double? = nil, y: Double? = nil, toX: Double? = nil,
                 toY: Double? = nil, dx: Double? = nil, dy: Double? = nil, text: String? = nil, key: String? = nil,
-                modifiers: [String]? = nil) {
+                modifiers: [String]? = nil, clickCount: Int? = nil, pickedUp: Bool? = nil) {
+        self.clickCount = clickCount
+        self.pickedUp = pickedUp
         self.displayId = displayId
         self.action = action
         self.x = x
@@ -402,12 +429,110 @@ nonisolated public struct ScreenStartParams: Codable, Sendable {
     public var fps: Int
     /// JPEG quality 0...1.
     public var quality: Double
+    /// "hevc", "h264" or "jpeg". Nil means JPEG (phones from before the video codecs). The hub falls back from HEVC
+    /// to H.264 to JPEG if an encoder can't start, and the frames' kind and codec byte say what was chosen.
+    public var codec: String?
+    /// Target bits per second for HEVC and H.264; the hub may go lower when the link backs up.
+    public var bitrate: Int?
+    /// The phone passed its 4:4:4 decode test: HEVC may use 4:4:4 chroma.
+    public var chroma444: Bool?
+    /// The phone draws the pointer itself: the hub leaves it out of the picture and sends `CursorPositionMessage`s
+    /// and `CursorShapeMessage`s.
+    public var cursor: Bool?
 
-    public init(displayId: UInt32?, maxPixels: Int = 1600, fps: Int = 8, quality: Double = 0.6) {
+    public init(displayId: UInt32?, maxPixels: Int = 1600, fps: Int = 8, quality: Double = 0.6, codec: String? = nil,
+                bitrate: Int? = nil, chroma444: Bool? = nil, cursor: Bool? = nil) {
         self.displayId = displayId
         self.maxPixels = maxPixels
         self.fps = fps
         self.quality = quality
+        self.codec = codec
+        self.bitrate = bitrate
+        self.chroma444 = chroma444
+        self.cursor = cursor
+    }
+}
+
+/// `screen.feedback`, from the phone on its screen connection, no reply: sent with every decoded video frame and at
+/// least every 20 ms while streaming (which keeps the Wi-Fi awake in that direction too).
+nonisolated public struct ScreenFeedback: Codable, Sendable, Equatable {
+    /// The sequence number of the newest frame decoded and shown, if any yet.
+    public var sequence: UInt32?
+    /// Long-term reference tokens of the frames decoded since the last feedback.
+    public var ltrTokens: [UInt32]
+    /// The phone lost its place (a sequence gap or a decode error): it needs a frame marked `refresh`. With no
+    /// `sequence` (nothing decoded yet, say a new decoder), or when a refresh sent half a second ago hasn't moved
+    /// `sequence` past it, the hub sends a keyframe instead.
+    public var refresh: Bool
+    /// Picture bytes received since the last feedback, and over how many milliseconds, for the hub's bitrate.
+    public var receivedBytes: Int?
+    public var intervalMs: Double?
+    /// How long the newest frame took to decode, in milliseconds.
+    public var decodeMs: Double?
+    /// Over UDP: how many frames the phone's transport has given up so far (a running count). A loss reported after a
+    /// refresh went out may be that refresh: the hub asks for another refresh at once rather than a keyframe later.
+    public var lost: Int?
+
+    public init(sequence: UInt32?, ltrTokens: [UInt32] = [], refresh: Bool = false, receivedBytes: Int? = nil,
+                intervalMs: Double? = nil, decodeMs: Double? = nil, lost: Int? = nil) {
+        self.sequence = sequence
+        self.ltrTokens = ltrTokens
+        self.refresh = refresh
+        self.receivedBytes = receivedBytes
+        self.intervalMs = intervalMs
+        self.decodeMs = decodeMs
+        self.lost = lost
+    }
+}
+
+/// How the Mac's sound arrives: the answer to `screen.audio`.
+nonisolated public struct MacAudioFormat: Codable, Sendable, Equatable {
+    /// "aac" (AAC-LC), "aac-eld" (AAC-ELD, for phones that ask for it) or "opus" (over UDP).
+    public var codec: String
+    public var sampleRate: Double
+    public var channels: Int
+    public var framesPerPacket: Int
+    /// The encoder's magic cookie, which the decoder needs.
+    public var magicCookie: Data
+    /// The sound comes as `TimedAudioMessage`s, each with its capture time (hubs from step 2 on, to phones that ask).
+    public var timed: Bool?
+
+    public init(codec: String, sampleRate: Double, channels: Int, framesPerPacket: Int, magicCookie: Data,
+                timed: Bool? = nil) {
+        self.codec = codec
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.framesPerPacket = framesPerPacket
+        self.magicCookie = magicCookie
+        self.timed = timed
+    }
+}
+
+/// The Mac's output volume and a display's brightness, 0...1; nil where the Mac can't change one.
+nonisolated public struct MacLevels: Codable, Sendable, Equatable {
+    public var volume: Double?
+    public var muted: Bool?
+    public var brightness: Double?
+
+    public init(volume: Double?, muted: Bool?, brightness: Double?) {
+        self.volume = volume
+        self.muted = muted
+        self.brightness = brightness
+    }
+}
+
+/// `mac.levels`: what to change (nothing, to read them); brightness is the given display's, else the main one's.
+nonisolated public struct MacLevelsParams: Codable, Sendable {
+    public var displayId: UInt32?
+    public var volume: Double?
+    public var muted: Bool?
+    public var brightness: Double?
+
+    public init(displayId: UInt32?, volume: Double? = nil, muted: Bool? = nil, brightness: Double? = nil) {
+        self.displayId = displayId
+        self.volume = volume
+        self.muted = muted
+        self.brightness = brightness
     }
 }
 

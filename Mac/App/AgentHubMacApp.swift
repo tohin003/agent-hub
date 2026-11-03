@@ -31,32 +31,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 }
-
-/// The menu bar glyph: the blob as a one-colour template image (so macOS tints it), with its agents as small tiles
-/// on the orbit; an orange badge joins it (in colour) when a session needs you.
-enum MenuBarIcon {
-    @MainActor private static var cache: [String: NSImage] = [:]
-
-    @MainActor
-    static func image(attention: Bool, logos: [TerminalLogo] = []) -> NSImage {
-        let key = "\(attention)-\(logos.count)"
-        if let image = cache[key] { return image }
-        let arts = logos.prefix(4).map { TerminalArt(ansi: $0.mark) }
-        let size = CGSize(width: 26, height: 18)
-        let renderer = ImageRenderer(content: Canvas { context, canvasSize in
-            // The scene is wider than tall: draw it into a square as wide as the icon, centred.
-            let side = canvasSize.width
-            var scene = context
-            scene.translateBy(x: 0, y: (canvasSize.height - side) / 2)
-            BlobRenderer.draw(scene, size: CGSize(width: side, height: side), mood: .working, time: 0,
-                              palette: attention ? .flat(.black, badge: .orange) : .flat(.black), logos: Array(arts),
-                              shadow: false)
-        }.frame(width: size.width, height: size.height))
-        renderer.scale = 2
-        let image = renderer.nsImage ?? NSImage(systemSymbolName: "circle.hexagongrid", accessibilityDescription: nil)!
-        image.isTemplate = !attention
-        image.size = size
-        cache[key] = image
-        return image
-    }
-}
