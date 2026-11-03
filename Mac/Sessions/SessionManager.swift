@@ -15,6 +15,21 @@ final class SessionManager {
         var agentSessionId: String?
         var transcriptPath: String?
         var resumeId: String?
+        /// A Claude Code background session this one shows (`claude attach <id>`): it runs on in Claude's own
+        /// service, so restarting attaches again rather than resuming a copy.
+        var attachedTo: String? = nil
+    }
+
+    /// A conversation moving here from a terminal tab: its process there, closed once it's idle, and where it showed.
+    struct Handoff {
+        var pid: Int32
+        var tty: String?
+        var app: String?
+        /// How the phone asked to continue it (model, effort, permission mode).
+        var params: CreateSessionParams
+        /// Past waiting: closing it there and starting it here.
+        var closing = false
+        var task: Task<Void, Never>?
     }
 
     final class Live {
@@ -33,6 +48,13 @@ final class SessionManager {
         var statusModified: Date?
         /// The model and effort last chosen from the phone, as the agent confirmed them, until it reports its own.
         var picked: (model: String?, effort: String?, at: Date)?
+        /// Set while the conversation is still open in a terminal tab, waiting to move here.
+        var handoff: Handoff?
+        /// When the agent was last started in tmux (an agent that hasn't drawn yet is "starting" for a while).
+        var launchedAt = Date.now
+        /// The last message-box reading checked against the screen's colours (a grey placeholder looks like text
+        /// without them), reused while the screen shows the same text.
+        var draftCheck: (seen: String, draft: String?, at: Date)?
 
         init(record: Record, info: SessionInfo) {
             self.record = record
@@ -116,6 +138,14 @@ final class SessionManager {
         guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw WireError.notFound("\(cwd) isn't a folder on the Mac.")
         }
+        // A conversation open elsewhere on the Mac is taken over, not copied: Claude Code says where it runs.
+        if account.provider == .claude, params.takeOver != nil, params.fork != true, let conversation = params.resumeId,
+           let running = await runningElsewhere(account: account)?[conversation] {
+            switch running.agent.kind {
+            case .background: return try await attach(running.agent, account: account, params: params, cwd: cwd)
+            case .interactive: return try takeOver(running.agent, host: running.host, account: account, params: params, cwd: cwd)
+            }
+        }
         let id = Self.newId()
         var adjusted = params
         adjusted.cwd = cwd
@@ -157,8 +187,205 @@ final class SessionManager {
         return info
     }
 
+    // MARK: Taking over
+
+    /// The account's conversations open outside the hub right now, by conversation id, with where each shows. Nil
+    /// when the agent couldn't say.
+    func runningElsewhere(account: Account) async -> [String: (agent: RunningAgents.Agent, host: RunningAgents.Host)]? {
+        guard let agents = await RunningAgents.list(account: account) else { return nil }
+        let hubTTYs = Set(await tmux.listPanes().map(\.tty).filter { !$0.isEmpty })
+        let hubConversations = Set(live.values.filter { $0.info.state != .ended }
+            .compactMap { $0.info.agentSessionId ?? $0.record.agentSessionId })
+        let hosts = await RunningAgents.hosts(of: agents.compactMap(\.pid))
+        var found: [String: (agent: RunningAgents.Agent, host: RunningAgents.Host)] = [:]
+        for agent in agents where !hubConversations.contains(agent.sessionId) {
+            let host = agent.pid.flatMap { hosts[$0] } ?? RunningAgents.Host()
+            // An agent in one of the hub's own panes is the hub's.
+            if let tty = host.tty, hubTTYs.contains(tty) { continue }
+            found[agent.sessionId] = (agent, host)
+        }
+        return found
+    }
+
+    /// Shows one of Claude Code's background sessions as it runs (`claude attach`), with no window: nothing is
+    /// restarted, and the session carries on in Claude Code's service when this one ends.
+    private func attach(_ agent: RunningAgents.Agent, account: Account, params: CreateSessionParams,
+                        cwd fallback: String) async throws -> SessionInfo {
+        guard let shortId = agent.shortId else { throw WireError.failed("That background session has no id to attach to.") }
+        let cwd = FileManager.default.fileExists(atPath: agent.cwd) ? agent.cwd : fallback
+        let id = Self.newId()
+        let folder = URL(fileURLWithPath: cwd).lastPathComponent
+        let plan = try Launcher.attachPlan(sessionId: id, account: account, cwd: cwd, shortId: shortId,
+                                           conversation: agent.sessionId, title: params.title ?? account.name)
+        try await tmux.newSession(name: id, directory: cwd, command: plan.tmuxCommand, columns: 150, rows: 46,
+                                  environment: ["AGENTHUB_SESSION": id])
+        await tmux.setOption(session: id, key: "@agenthub_title", value: "\(account.name) · \(folder)")
+        let record = Record(id: id, accountId: account.id, provider: account.provider, cwd: cwd,
+                            customTitle: params.title?.nilIfEmpty, initialTitle: agent.name, createdAt: .now,
+                            agentSessionId: agent.sessionId, transcriptPath: nil, resumeId: agent.sessionId,
+                            attachedTo: shortId)
+        let info = SessionInfo(id: id, accountId: account.id, provider: account.provider,
+                               title: record.customTitle ?? agent.name ?? folder, cwd: cwd, createdAt: record.createdAt,
+                               lastActivity: .now, state: .starting, agentSessionId: agent.sessionId)
+        register(record, info, account: account)
+        Log.info("sessions: \(id) shows \(account.id)'s background session \(shortId)")
+        return info
+    }
+
+    /// Moves a conversation open in a terminal tab here. Once the agent there has finished its turn (at once with
+    /// `.now`), it's closed and the same conversation continues in the hub; its tab then shows it from here
+    /// (`completeHandoff`). Until then the session is listed with the conversation's live timeline.
+    private func takeOver(_ agent: RunningAgents.Agent, host: RunningAgents.Host, account: Account,
+                          params: CreateSessionParams, cwd fallback: String) throws -> SessionInfo {
+        guard let pid = agent.pid else { throw WireError.failed("Couldn't find that session's process on the Mac.") }
+        let cwd = FileManager.default.fileExists(atPath: agent.cwd) ? agent.cwd : fallback
+        let id = Self.newId()
+        let app = host.app ?? "a terminal"
+        let waits = agent.busy && params.takeOver != .now
+        let record = Record(id: id, accountId: account.id, provider: account.provider, cwd: cwd,
+                            customTitle: params.title?.nilIfEmpty, initialTitle: agent.name, createdAt: .now,
+                            agentSessionId: agent.sessionId, transcriptPath: nil, resumeId: agent.sessionId)
+        var info = SessionInfo(id: id, accountId: account.id, provider: account.provider,
+                               title: record.customTitle ?? agent.name ?? URL(fileURLWithPath: cwd).lastPathComponent,
+                               cwd: cwd, createdAt: record.createdAt, lastActivity: .now, state: .starting,
+                               agentSessionId: agent.sessionId)
+        info.stateDetail = waits ? Self.finishingTurn(app) : "Moving here from \(app)…"
+        info.movingFrom = waits ? app : nil
+        let session = register(record, info, account: account)
+        session.handoff = Handoff(pid: pid, tty: host.tty, app: host.app, params: params)
+        session.handoff?.task = Task { [weak self] in
+            await self?.completeHandoff(id, account: account, params: params, waits: params.takeOver != .now)
+        }
+        Log.info("sessions: \(id) takes over \(agent.sessionId) from \(app) (pid \(pid)\(waits ? ", after its turn" : ""))")
+        return info
+    }
+
+    private static func finishingTurn(_ app: String) -> String {
+        "Finishing its turn in \(app). Agent Hub takes over after that."
+    }
+
+    /// Waits for the agent in the terminal tab to finish its turn (checked again right before, so a turn that has
+    /// just started isn't cut off; a question waiting for an answer there doesn't count, as it can't be answered from
+    /// here), closes it there (Claude Code saves and exits on SIGTERM), continues the same conversation here, and
+    /// shows it in that tab.
+    private func completeHandoff(_ id: String, account: Account, params: CreateSessionParams, waits: Bool) async {
+        guard let session = live[id], let handoff = session.handoff else { return }
+        let app = handoff.app ?? "a terminal"
+        if waits {
+            while !Task.isCancelled, RunningAgents.isAlive(handoff.pid), await agentBusy(handoff.pid, account: account) {
+                if session.info.movingFrom == nil {
+                    session.info.stateDetail = Self.finishingTurn(app)
+                    session.info.movingFrom = app
+                    onSessionChanged?(session.info)
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        guard !Task.isCancelled, live[id]?.handoff != nil else { return }
+        session.handoff?.closing = true
+        session.info.movingFrom = nil
+        if RunningAgents.isAlive(handoff.pid) {
+            session.info.stateDetail = "Moving here from \(app)…"
+            onSessionChanged?(session.info)
+            Darwin.kill(handoff.pid, SIGTERM)
+            var closed = false
+            for _ in 0..<50 where !closed {
+                try? await Task.sleep(for: .milliseconds(200))
+                closed = !RunningAgents.isAlive(handoff.pid)
+            }
+            guard closed else {
+                endHandoff(id, reason: "Claude didn't close in \(app), so it's still running there.")
+                return
+            }
+        }
+        guard live[id]?.handoff != nil else { return }
+        var resume = params
+        resume.cwd = session.record.cwd
+        resume.resumeId = session.record.agentSessionId
+        resume.fork = nil
+        resume.takeOver = nil
+        resume.prompt = nil
+        let folder = URL(fileURLWithPath: session.record.cwd).lastPathComponent
+        do {
+            let plan = try Launcher.plan(sessionId: id, account: account, params: resume)
+            try await tmux.newSession(name: id, directory: session.record.cwd, command: plan.tmuxCommand, columns: 150,
+                                      rows: 46, environment: ["AGENTHUB_SESSION": id])
+        } catch {
+            endHandoff(id, reason: "It closed in \(app) but didn't start here. Continue it from History.")
+            return
+        }
+        await tmux.setOption(session: id, key: "@agenthub_title", value: "\(account.name) · \(folder)")
+        session.handoff = nil
+        session.launchedAt = .now
+        session.sawAgentProcess = false
+        session.info.stateDetail = nil
+        onSessionChanged?(session.info)
+        save()
+        Log.info("sessions: \(id) continues \(session.record.agentSessionId ?? "?") here, moved from \(app)")
+        if let tty = handoff.tty {
+            await windows.reattach(session: id, title: "\(account.name) · \(folder)", tty: tty, app: handoff.app)
+            await refreshWindowState(id)
+        }
+    }
+
+    /// Working on a turn right now: the record Claude Code keeps for the process, or failing that, its own list.
+    private func agentBusy(_ pid: Int32, account: Account) async -> Bool {
+        if let busy = RunningAgents.isBusy(pid: pid, dataDir: account.dataDir) { return busy }
+        return await RunningAgents.list(account: account)?.first { $0.pid == pid }?.busy ?? false
+    }
+
+    /// Stops waiting for the turn in the terminal tab to end: takes the session over now (the turn stops there).
+    func takeOverNow(_ id: String) throws {
+        guard let session = live[id], let handoff = session.handoff,
+              let account = accounts().first(where: { $0.id == session.record.accountId }) else {
+            throw WireError.badRequest("That session isn't waiting to move here.")
+        }
+        guard !handoff.closing else { return }
+        handoff.task?.cancel()
+        var params = handoff.params
+        params.takeOver = .now
+        session.handoff?.task = Task { [weak self] in
+            await self?.completeHandoff(id, account: account, params: params, waits: false)
+        }
+        Log.info("sessions: \(id) takes over now, without waiting for the turn")
+    }
+
+    private func endHandoff(_ id: String, reason: String) {
+        guard let session = live[id] else { return }
+        session.handoff = nil
+        session.info.movingFrom = nil
+        session.info.state = .ended
+        session.info.stateDetail = reason
+        onSessionChanged?(session.info)
+        save()
+        Log.warn("sessions: \(id) wasn't taken over: \(reason)")
+    }
+
+    @discardableResult
+    private func register(_ record: Record, _ info: SessionInfo, account: Account) -> Live {
+        let session = Live(record: record, info: info)
+        session.handle = makeHandle(record: record, account: account)
+        live[record.id] = session
+        order.insert(record.id, at: 0)
+        save()
+        onFolderUsed?(record.cwd)
+        onSessionChanged?(info)
+        return session
+    }
+
     func kill(_ id: String, closeWindow: Bool) async {
         guard let session = live[id] else { return }
+        if let handoff = session.handoff {
+            // Still in its terminal tab: leave it there.
+            handoff.task?.cancel()
+            session.handoff = nil
+            session.info.movingFrom = nil
+            session.info.state = .ended
+            session.info.stateDetail = nil
+            onSessionChanged?(session.info)
+            save()
+            return
+        }
         if closeWindow { await windows.close(session: id) }
         await tmux.kill(session: id)
         session.info.state = .ended
@@ -204,10 +431,59 @@ final class SessionManager {
 
     // MARK: Input
 
-    func send(_ id: String, text: String, submit: Bool) async throws {
+    /// Types a message into the agent's message box. Anything already typed there (a message the agent handed back
+    /// to edit, or words typed on the Mac) is replaced, never joined, and only when the phone has seen it: sent
+    /// unchanged, it goes with Return alone, exactly as the agent holds it (pasted text and images included).
+    func send(_ id: String, text: String, submit: Bool, replacingDraft: String? = nil) async throws {
         guard let session = live[id], session.info.state != .ended else { throw WireError.notFound("That session has ended.") }
+        if let handoff = session.handoff {
+            throw WireError.badRequest("Agent Hub takes this session over from \(handoff.app ?? "the terminal") once Claude "
+                                       + "finishes its turn there. Send it then.")
+        }
+        if session.record.provider == .claude || session.record.provider == .codex {
+            let plain = await tmux.capture(sessions: [id], escapes: false)[id] ?? ""
+            let open = PaneReader.read(plain).prompt
+            if open == nil || open?.optional == true, PaneReader.inputDraft(plain: plain) != nil,
+               let draft = PaneReader.inputDraft(plain: plain, styled: await tmux.capture(sessions: [id], escapes: true)[id]) {
+                guard let seen = replacingDraft, PaneReader.sameDraft(seen, draft) else {
+                    session.info.draft = draft
+                    onSessionChanged?(session.info)
+                    throw WireError.badRequest("Something is typed in the message box on the Mac: “\(Clip.oneLine(draft, limit: 60))”. "
+                                               + "Send again to replace it.")
+                }
+                if submit, PaneReader.sameDraft(text, draft) {
+                    await tmux.sendKeys(session: id, keys: ["Enter"])
+                    session.info.lastActivity = .now
+                    return
+                }
+                guard await clearMessageBox(id, draft: draft) else {
+                    throw WireError.failed("Couldn't clear the message box on the Mac, so nothing was sent.")
+                }
+            }
+        }
         await tmux.paste(session: id, text: text, submit: submit)
         session.info.lastActivity = .now
+    }
+
+    /// Empties the agent's message box: to the end of the draft, then Backspace over all of it (more presses than
+    /// needed do nothing in an empty box), checked on screen. A cursor left inside the draft gets another pass.
+    private func clearMessageBox(_ id: String, draft: String) async -> Bool {
+        for pass in 0..<3 {
+            // Down to the draft's last row (a no-op on it), then to the end of that row.
+            await tmux.sendKey(session: id, key: "Down", count: draft.count / 40 + 2)
+            try? await Task.sleep(for: .milliseconds(70))
+            await tmux.sendKeys(session: id, keys: ["C-e"])
+            try? await Task.sleep(for: .milliseconds(70))
+            await tmux.sendKey(session: id, key: "BSpace", count: draft.count + 16 + pass * 32)
+            for _ in 0..<6 {
+                try? await Task.sleep(for: .milliseconds(120))
+                let plain = await tmux.capture(sessions: [id], escapes: false)[id] ?? ""
+                guard PaneReader.inputDraft(plain: plain) != nil else { return true }
+                let styled = await tmux.capture(sessions: [id], escapes: true)[id]
+                if PaneReader.inputDraft(plain: plain, styled: styled) == nil { return true }
+            }
+        }
+        return false
     }
 
     func keys(_ id: String, keys: [String]) async throws {
@@ -558,6 +834,9 @@ final class SessionManager {
         let resume = session.info.agentSessionId ?? session.record.agentSessionId
         var words = [account.command]
         switch account.provider {
+        case .claude where session.record.attachedTo != nil:
+            // Still running in Claude Code's background service: show it again.
+            words += ["attach", session.record.attachedTo ?? ""]
         case .claude:
             if let resume { words += ["--resume", resume] }
             words += ["--settings", HubPaths.claudeSettings]
@@ -572,6 +851,7 @@ final class SessionManager {
         }
         let line = ([words[0]] + words.dropFirst().map(Shell.quote)).joined(separator: " ")
         session.sawAgentProcess = false
+        session.launchedAt = .now
         session.info.state = .starting
         onSessionChanged?(session.info)
         await tmux.paste(session: id, text: line, submit: true)
@@ -685,15 +965,15 @@ final class SessionManager {
 
     private func tick() async {
         tickCount += 1
-        let alive = order.filter { live[$0]?.info.state != .ended }
-        guard !alive.isEmpty else { return }
-        let panes = await tmux.listPanes()
+        // A conversation still moving here from a terminal tab has no tmux session yet; its timeline is read below.
+        let alive = order.filter { live[$0]?.info.state != .ended && live[$0]?.handoff == nil }
+        let panes = alive.isEmpty ? [] : await tmux.listPanes()
         var paneMap: [String: PaneInfo] = [:]
         for pane in panes where paneMap[pane.session] == nil { paneMap[pane.session] = pane }
 
         // Sessions whose tmux session is gone have ended (unless tmux itself didn't answer).
         var tmuxAnswered = !panes.isEmpty
-        if !tmuxAnswered {
+        if !tmuxAnswered, !alive.isEmpty {
             let firstAlive = await tmux.hasSession(alive[0])
             tmuxAnswered = !firstAlive
         }
@@ -725,7 +1005,8 @@ final class SessionManager {
             for id in statusIds {
                 guard let text = texts[id], let pane = paneMap[id] else { continue }
                 let reading = await tmux.reading(id, plain: text)
-                updateStatus(id, text: text, reading: reading, pane: pane)
+                let draft = await messageBoxDraft(id, plain: text, reading: reading)
+                updateStatus(id, text: text, reading: reading, pane: pane, draft: draft)
             }
         }
         if !terminalIds.isEmpty {
@@ -756,7 +1037,21 @@ final class SessionManager {
         }
     }
 
-    private func updateStatus(_ id: String, text: String, reading: PaneReader.Reading, pane: PaneInfo) {
+    /// What's typed in a Claude Code or Codex message box, for the phone's own box. The plain screen says whether
+    /// there's text; its colours (checked again only when that text changes, or every few seconds) say whether
+    /// it's a grey placeholder or a suggestion rather than a draft.
+    private func messageBoxDraft(_ id: String, plain: String, reading: PaneReader.Reading) async -> String? {
+        guard let session = live[id], session.record.provider == .claude || session.record.provider == .codex,
+              reading.prompt == nil || reading.prompt?.optional == true,
+              let seen = PaneReader.inputDraft(plain: plain) else { return nil }
+        if let check = session.draftCheck, check.seen == seen, Date.now.timeIntervalSince(check.at) < 4 { return check.draft }
+        let styled = await tmux.capture(sessions: [id], escapes: true)[id]
+        let draft = styled == nil ? nil : PaneReader.inputDraft(plain: plain, styled: styled)
+        session.draftCheck = (seen, draft, .now)
+        return draft
+    }
+
+    private func updateStatus(_ id: String, text: String, reading: PaneReader.Reading, pane: PaneInfo, draft: String?) {
         guard let session = live[id] else { return }
         var info = session.info
         let shells: Set<String> = ["zsh", "-zsh", "bash", "-bash", "sh", "fish", "login", "tmux"]
@@ -768,7 +1063,7 @@ final class SessionManager {
         } else if session.record.provider == .shell {
             state = atShell ? .idle : .working
         } else if atShell {
-            state = session.sawAgentProcess || Date.now.timeIntervalSince(session.record.createdAt) > 25 ? .exited : .starting
+            state = session.sawAgentProcess || Date.now.timeIntervalSince(session.launchedAt) > 25 ? .exited : .starting
         } else if reading.working {
             state = .working
         } else {
@@ -783,6 +1078,7 @@ final class SessionManager {
         info.state = state
         info.stateDetail = state == .working ? reading.statusLine : nil
         info.attention = reading.prompt
+        info.draft = draft
         info.hasWindow = pane.clients > 0
         info.columns = pane.width
         info.rows = pane.height

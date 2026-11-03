@@ -52,11 +52,16 @@ struct SessionRow: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.orange)
                 .lineLimit(2)
-        } else if session.state == .working, let status = session.stateDetail, !status.isEmpty {
+        } else if session.state == .working || session.state == .starting, let status = session.stateDetail, !status.isEmpty {
             Text(status)
                 .font(.subheadline)
                 .foregroundStyle(.tint)
-                .lineLimit(1)
+                .lineLimit(session.state == .starting ? 2 : 1)
+        } else if session.state == .ended, let reason = session.stateDetail, !reason.isEmpty {
+            Text(reason)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
         } else if let last = session.lastMessage {
             Text(last)
                 .font(.subheadline)

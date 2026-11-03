@@ -1,6 +1,12 @@
 import AppKit
 import CoreGraphics
 
+/// The real Mac's Spaces, for `SpaceSwitcher`.
+struct SystemSpaces: SpacesBackend {
+    func displays() async -> [DisplayInfo] { await MainActor.run { Spaces.displays() } }
+    func move(display: UInt32, steps: Int) async { await Spaces.move(display: CGDirectDisplayID(display), steps: steps) }
+}
+
 /// The Mac's displays and their Spaces. Listing Spaces uses SkyLight's read-only space list (looked up at run time,
 /// so a macOS change only hides the Spaces strip); switching uses the standard ⌃← / ⌃→ shortcuts.
 enum Spaces {
@@ -103,9 +109,10 @@ enum Spaces {
             CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY))
         }
         let code: CGKeyCode = steps > 0 ? 124 : 123
-        for _ in 0..<abs(steps) {
+        for step in 0..<abs(steps) {
+            // Between presses only: the caller waits for the Mac to get there (`SpaceSwitcher`).
+            if step > 0 { try? await Task.sleep(for: .milliseconds(420)) }
             InputInjector.press(code, flags: [.maskControl, .maskSecondaryFn, .maskNumericPad])
-            try? await Task.sleep(for: .milliseconds(420))
         }
     }
 

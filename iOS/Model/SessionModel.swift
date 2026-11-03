@@ -119,10 +119,12 @@ final class SessionModel {
 
     // MARK: Actions
 
-    func send(_ text: String) async -> Bool {
+    /// Sends a message. `replacingDraft` is the Mac's draft the message box showed: the message takes its place.
+    func send(_ text: String, replacingDraft: String? = nil) async -> Bool {
         guard let store else { return false }
         do {
-            try await store.client.send(Method.sessionSend, SendParams(sessionId: session.id, text: text, submit: true))
+            try await store.client.send(Method.sessionSend, SendParams(sessionId: session.id, text: text, submit: true,
+                                                                       replacingDraft: replacingDraft))
             return true
         } catch {
             store.toast = ToastEvent(message: HubClient.describe(error), level: "error")

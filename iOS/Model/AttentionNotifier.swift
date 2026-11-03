@@ -120,7 +120,7 @@ struct InAppAlert: Identifiable, Equatable {
     static func == (a: InAppAlert, b: InAppAlert) -> Bool { a.id == b.id }
 }
 
-/// Opens the session a notification is about, and answers from its buttons.
+/// Opens the session a notification is about, and answers from its buttons. Also tells iOS which way the app may turn.
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     @MainActor var store: HubStore?
 
@@ -128,6 +128,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         return true
+    }
+
+    /// Upright, except while the Screen tab is laid on its side (`OrientationLock`).
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        OrientationLock.shared.supported
     }
 
     /// In the app, the in-app banner speaks for it.

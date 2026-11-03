@@ -6,6 +6,37 @@ import CoreGraphics
 enum InputInjector {
     private static let source = CGEventSource(stateID: .hidSystemState)
 
+    /// The modifier keys. A new event starts with the modifiers the system's input state reports, not necessarily the
+    /// ones the phone asked for, and a stray ⌃ would turn a click into a Control-click, which macOS treats as a
+    /// right-click. So every event carries exactly the modifiers the phone sent.
+    private static let modifierKeys: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand,
+                                                      .maskSecondaryFn, .maskHelp, .maskNumericPad]
+
+    /// `flags` with exactly `modifiers` as its modifier keys; its other bits (Caps Lock among them) are kept.
+    static func flags(_ flags: CGEventFlags, modifiers: CGEventFlags) -> CGEventFlags {
+        flags.subtracting(modifierKeys).union(modifiers)
+    }
+
+    /// Marks the events the hub posts, so the privacy screen lets the phone's clicks and keys through while it holds
+    /// back the Mac's own mouse and keyboard.
+    static let marker: Int64 = 0x4147_4855_4221
+
+    static func mark(_ event: CGEvent) {
+        event.setIntegerValueField(.eventSourceUserData, value: marker)
+    }
+
+    /// Whether the hub posted this event (for the phone).
+    static func isOwn(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData) == marker
+    }
+
+    private static func post(_ event: CGEvent?, modifiers: CGEventFlags = []) {
+        guard let event else { return }
+        event.flags = flags(event.flags, modifiers: modifiers)
+        mark(event)
+        event.post(tap: .cghidEventTap)
+    }
+
     static var trusted: Bool { AXIsProcessTrusted() }
 
     /// A point on a display, from the phone's 0...1 coordinates, in global screen coordinates (points).
@@ -25,7 +56,9 @@ enum InputInjector {
         case .move:
             move(to: point(display: display, x: input.x ?? 0.5, y: input.y ?? 0.5))
         case .click:
-            click(at: point(display: display, x: input.x ?? 0.5, y: input.y ?? 0.5), button: .left, count: 1, flags: flags)
+            // A quick second tap arrives as click 2, so apps see a double click just as from a mouse.
+            click(at: point(display: display, x: input.x ?? 0.5, y: input.y ?? 0.5), button: .left,
+                  count: min(max(input.clickCount ?? 1, 1), 3), flags: flags)
         case .doubleClick:
             let at = point(display: display, x: input.x ?? 0.5, y: input.y ?? 0.5)
             click(at: at, button: .left, count: 1, flags: flags)
@@ -46,12 +79,29 @@ enum InputInjector {
                 throw WireError.badRequest("Unknown key \(input.key ?? "")")
             }
             press(code, flags: flags)
+        case .dragStart, .dragMove, .dragEnd:
+            // A live drag goes through the hub's `MouseDragSession`, which never leaves the button down.
+            throw WireError.badRequest("A live drag needs the drag session.")
         }
     }
 
+    /// The live drag's events, marked as the hub's own: a press (click state 1, never a double-click, so a picked-up file
+    /// isn't opened), drags, and the release.
+    static func mouseDown(at point: CGPoint) {
+        move(to: point)
+        mouse(.leftMouseDown, at: point)
+    }
+    static func mouseDragged(to point: CGPoint) { mouse(.leftMouseDragged, at: point) }
+    static func mouseUp(at point: CGPoint) { mouse(.leftMouseUp, at: point) }
+
+    private static func mouse(_ type: CGEventType, at point: CGPoint) {
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        post(event)
+    }
+
     static func move(to point: CGPoint) {
-        CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
-            .post(tap: .cghidEventTap)
+        post(CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left))
     }
 
     static func click(at point: CGPoint, button: CGMouseButton, count: Int, flags: CGEventFlags) {
@@ -60,28 +110,27 @@ enum InputInjector {
         for type in [down, up] {
             guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else { continue }
             event.setIntegerValueField(.mouseEventClickState, value: Int64(count))
-            if !flags.isEmpty { event.flags = flags }
-            event.post(tap: .cghidEventTap)
+            post(event, modifiers: flags)
             usleep(12_000)
         }
     }
 
     static func drag(from start: CGPoint, to end: CGPoint) {
         move(to: start)
-        CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left)?.post(tap: .cghidEventTap)
+        post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left))
         let steps = 12
         for step in 1...steps {
             let t = Double(step) / Double(steps)
             let p = CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
-            CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+            post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left))
             usleep(10_000)
         }
-        CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left)?.post(tap: .cghidEventTap)
+        post(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left))
     }
 
     static func scroll(dx: Double, dy: Double) {
-        CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: Int32(dy.rounded()),
-                wheel2: Int32(dx.rounded()), wheel3: 0)?.post(tap: .cghidEventTap)
+        post(CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: Int32(dy.rounded()),
+                     wheel2: Int32(dx.rounded()), wheel3: 0))
     }
 
     static func type(_ text: String) {
@@ -94,7 +143,7 @@ enum InputInjector {
             for keyDown in [true, false] {
                 guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: keyDown) else { continue }
                 event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
-                event.post(tap: .cghidEventTap)
+                post(event)
             }
             usleep(4_000)
         }
@@ -102,9 +151,7 @@ enum InputInjector {
 
     static func press(_ code: CGKeyCode, flags: CGEventFlags) {
         for keyDown in [true, false] {
-            guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: keyDown) else { continue }
-            event.flags = flags
-            event.post(tap: .cghidEventTap)
+            post(CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: keyDown), modifiers: flags)
             usleep(8_000)
         }
     }
@@ -141,4 +188,16 @@ enum InputInjector {
         guard name.count == 1, let character = name.lowercased().first else { return nil }
         return letters[character]
     }
+}
+
+/// The real Mac's mouse, for `MouseDragSession`.
+struct SystemMousePoster: MouseEventPoster {
+    /// The press, then a moment (10 ms, about a mouse's report interval) before the drag's first step, which for a
+    /// pick-up follows at once: the drag that Finder lifted a folder on came 11 ms after its press.
+    func down(at point: CGPoint) {
+        InputInjector.mouseDown(at: point)
+        usleep(10_000)
+    }
+    func dragged(to point: CGPoint) { InputInjector.mouseDragged(to: point) }
+    func up(at point: CGPoint) { InputInjector.mouseUp(at: point) }
 }

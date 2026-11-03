@@ -39,6 +39,17 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A8E5E85F0072C98BD714AE33"
+               BuildableName = "AgentHubUITests.xctest"
+               BlueprintName = "AgentHubUITests"
+               ReferencedContainer = "container:AgentHub.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

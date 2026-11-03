@@ -78,10 +78,12 @@ struct TimelineList: View {
     }
 }
 
-/// While the agent works: the blob busy with its agents around it, and the agent's own status line.
+/// While the agent works: the blob busy with its agents around it, and the agent's own status line. A session still
+/// finishing its turn in a terminal tab can be taken over now.
 struct WorkingFooter: View {
     var session: SessionInfo
     @Environment(HubStore.self) private var store
+    @State private var confirmNow = false
 
     var body: some View {
         if session.state == .working || session.state == .starting {
@@ -93,9 +95,29 @@ struct WorkingFooter: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .contentTransition(.numericText())
+                if let app = session.movingFrom {
+                    Spacer(minLength: 8)
+                    Button("Take Over Now") { confirmNow = true }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .confirmationDialog("Stop Claude's turn in \(app)?", isPresented: $confirmNow, titleVisibility: .visible) {
+                            Button("Stop the Turn and Take Over", role: .destructive) {
+                                Task { await store.takeOverNow(session.id) }
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("The turn stops where it is. The same conversation continues here, and you can ask Claude to carry on.")
+                        }
+                }
             }
             .padding(.vertical, 6)
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: session.movingFrom == nil ? .combine : .contain)
+        } else if session.state == .ended, let reason = session.stateDetail, !reason.isEmpty {
+            // Why it ended, when the hub knows (a takeover from a terminal tab that didn't go through).
+            Label(reason, systemImage: "exclamationmark.circle")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 6)
         }
     }
 }

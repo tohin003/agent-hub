@@ -181,16 +181,19 @@ final class HubStore {
     }
 
     /// Continues a past conversation in the folder it ran in, with the settings it last used. A conversation the hub
-    /// is already running is simply opened.
+    /// is already running is simply opened. One that Claude Code says is open elsewhere on the Mac is taken over
+    /// rather than copied (`takeOver`: after its current turn, or now): the same session, shown in its own Terminal
+    /// tab, so no new window. A copy (`fork`) is always a new conversation.
     @discardableResult
-    func resume(_ entry: HistoryEntry, account: Account, fork: Bool = false) async -> Bool {
+    func resume(_ entry: HistoryEntry, account: Account, fork: Bool = false, takeOver: TakeOver = .whenIdle) async -> Bool {
         if !fork, let running = sessions.first(where: { $0.agentSessionId == entry.id && $0.state != .ended }) {
             pendingSessionId = running.id
             return true
         }
         let params = CreateSessionParams(accountId: account.id, cwd: entry.cwd ?? "~", resumeId: entry.id, mode: entry.mode,
                                          model: entry.model, effort: entry.effort, fork: fork,
-                                         title: fork ? "Copy of \(entry.title)" : entry.title)
+                                         title: fork ? "Copy of \(entry.title)" : entry.title,
+                                         takeOver: fork ? nil : takeOver)
         do {
             let session = try await createSession(params)
             pendingSessionId = session.id
@@ -199,6 +202,11 @@ final class HubStore {
             toast = ToastEvent(message: HubClient.describe(error), level: "error")
             return false
         }
+    }
+
+    /// A session still in a terminal tab waiting for its turn to end: take it over now (the turn stops there).
+    func takeOverNow(_ id: String) async {
+        await perform { try await self.client.send(Method.sessionTakeOverNow, SessionRef(sessionId: id)) }
     }
 
     func kill(_ id: String) async {
@@ -305,6 +313,19 @@ final class HubStore {
 
     /// Whether the live screen is on (an older hub has no switch: on).
     var screenSharing: Bool { hub?.screenSharing ?? true }
+
+    /// Covers the Mac's displays while you drive it from here (people near it see a message), or uncovers them.
+    func setPrivacyScreen(_ on: Bool) async {
+        do {
+            let info: HubInfo = try await client.request(Method.screenPrivacy, ScreenSharingParams(enabled: on))
+            hub = info
+        } catch {
+            toast = ToastEvent(message: HubClient.describe(error), level: "error")
+        }
+    }
+
+    /// Whether the Mac's privacy screen is up (nil: this hub doesn't have one).
+    var privacyScreen: Bool? { hub?.privacyScreen }
 
     func refreshHub() async {
         if let info: HubInfo = try? await client.request(Method.macStatus, Empty()) { hub = info }

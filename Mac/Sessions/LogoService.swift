@@ -11,7 +11,7 @@ import Foundation
 @MainActor
 final class LogoService {
     static let folder = "\(HubPaths.root)/logos"
-    static let probeFolder = "\(HubPaths.root)/probe"
+    static let probeFolder = HubPaths.probe
 
     private let tmux: Tmux
     private(set) var logos: [String: TerminalLogo] = [:]

@@ -7,9 +7,23 @@ struct AgentHubApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environment(store)
-                .onAppear { appDelegate.store = store }
+            #if DEBUG
+            if UserDefaults.standard.bool(forKey: "screenGestureTest") {
+                ScreenGestureHarness()
+            } else if UserDefaults.standard.bool(forKey: "screenLayoutTest") {
+                ScreenLayoutHarness()
+            } else {
+                root
+            }
+            #else
+            root
+            #endif
         }
+    }
+
+    private var root: some View {
+        RootView()
+            .environment(store)
+            .onAppear { appDelegate.store = store }
     }
 }

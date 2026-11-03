@@ -14,6 +14,7 @@ the phone over Tailscale. Read `README.md` for the architecture before changing 
 | `iOS/` | The app: model (`Model/`), design tokens (`Design/`), screens (`Views/`), Live Activity (`LiveActivity/`). Swift 6, MainActor by default. |
 | `Widgets/` | The Lock Screen and Dynamic Island Live Activity (an app extension). |
 | `Tests/HubCoreTests/` | Swift Testing tests for the readers, many built from real captured screens. Run: `xcodebuild -scheme AgentHubMac test`. |
+| `UITests/` | The Screen tab's gestures played on a simulator against a debug-only harness (`-screenGestureTest YES`). Run: `xcodebuild test -scheme AgentHub -only-testing:AgentHubUITests -destination 'platform=iOS Simulator,name=…'`. |
 | `scripts/` | configure, install, renew, renew-check, icons, uninstall. |
 
 ## Rules

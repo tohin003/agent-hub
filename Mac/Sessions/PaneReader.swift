@@ -247,19 +247,34 @@ enum PaneReader {
     /// model and folder under it. Dialogs take its place, so anything above it is conversation.
     static func messageBoxLine(_ lines: [String]) -> Int? {
         let filled = lines.indices.filter { !lines[$0].trimmingCharacters(in: .whitespaces).isEmpty }
-        for (position, index) in filled.enumerated().reversed().prefix(8) {
-            let text = lines[index].trimmingCharacters(in: .whitespaces)
+        for (position, index) in filled.enumerated().reversed().prefix(48) {
+            // Claude Code draws its prompt as "❯" and a no-break space.
+            let text = lines[index].replacingOccurrences(of: "\u{00A0}", with: " ").trimmingCharacters(in: .whitespaces)
+            let below = filled[(position + 1)...]
             if text == "❯" || text.hasPrefix("❯ ") {
-                let above = position > 0 ? lines[filled[position - 1]] : ""
-                let below = position + 1 < filled.count ? lines[filled[position + 1]] : ""
-                if isRule(above) && isRule(below) { return index }
-                // A draft over several lines: the rule closes it further down.
-                if isRule(above), filled[(position + 1)...].prefix(4).contains(where: { isRule(lines[$0]) }) { return index }
+                guard position > 0, isRule(lines[filled[position - 1]]) else { continue }
+                // The rule under the box closes it; a draft over several lines sits indented above that rule.
+                guard let close = below.prefix(40).firstIndex(where: { isRule(lines[$0]) }) else { continue }
+                if below[..<close].allSatisfy({ lines[$0].hasPrefix("  ") }) { return index }
             } else if text == "›" || text.hasPrefix("› ") {
-                if position + 1 < filled.count, lines[filled[position + 1]].contains(" · ") { return index }
+                // Codex's model line ("GPT-6.1-Sol xhigh · ~/project") sits right under its box; a dialog's other
+                // options ("2. No") or the "/" menu between them mean it's a list, not the box.
+                guard let modelLine = below.prefix(40).firstIndex(where: { lines[$0].contains(" · ") }) else { continue }
+                if below[..<modelLine].allSatisfy({ lines[$0].hasPrefix("  ") && !isListRow(lines[$0]) }) { return index }
             }
         }
         return nil
+    }
+
+    /// A numbered option ("2. No") or a "/" menu row ("/model   choose what model to use").
+    private static func isListRow(_ line: String) -> Bool {
+        let text = line.trimmingCharacters(in: .whitespaces)
+        if let dot = text.firstIndex(of: "."), dot > text.startIndex, text.distance(from: text.startIndex, to: dot) <= 2,
+           text[..<dot].allSatisfy(\.isNumber), text[text.index(after: dot)...].hasPrefix(" ") { return true }
+        let ns = line as NSString
+        if let match = slashItem.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)),
+           match.range(at: 2).location != NSNotFound { return true }
+        return false
     }
 
     static func choicePrompt(_ lines: [String]) -> AttentionPrompt? {
@@ -841,24 +856,22 @@ enum PaneReader {
 
     // MARK: The message box
 
-    /// What's typed in the agent's message box ("❯ …" or "› …" right under a rule), if anything. Placeholder hints
-    /// (dim or grey text such as 'Try "…"') don't count. Pass the capture with colour codes when there is one.
+    /// What's typed in the agent's message box (Claude Code's "❯" line between its rules, Codex's "›" line over its
+    /// model line), if anything; a dialog's cursor line never counts. Placeholder hints (dim or grey text such as
+    /// 'Try "…"') don't count either. Pass the capture with colour codes when there is one. Lines are joined with
+    /// spaces, as the screen can't tell a wrapped line from a new one.
     static func inputDraft(plain: String, styled: String? = nil) -> String? {
-        let lines = cleanEscapes(plain).components(separatedBy: "\n").map { stripTrailing($0) }
-        // The last "❯"/"›" line among the bottom few: Claude Code's sits between two rules, Codex's has none.
-        let bottom = lines.indices.reversed().filter { !lines[$0].trimmingCharacters(in: .whitespaces).isEmpty }.prefix(8)
-        guard let index = bottom.first(where: { i in
-            let text = lines[i].trimmingCharacters(in: .whitespaces)
-            return text == "❯" || text.hasPrefix("❯ ") || text == "›" || text.hasPrefix("› ")
-        }) else { return nil }
-        var draft = String(lines[index].trimmingCharacters(in: .whitespaces).dropFirst()).trimmingCharacters(in: .whitespaces)
-        // A draft's further lines, up to the rule under Claude Code's box (Codex's next line is its status).
-        if lines[index].contains("❯"), index + 1 < lines.count,
-           let ruleBelow = lines[(index + 1)...].prefix(6).firstIndex(where: { isRule($0) }) {
-            for next in (index + 1)..<ruleBelow {
-                let text = lines[next].trimmingCharacters(in: .whitespaces)
-                if !text.isEmpty { draft += " " + text }
-            }
+        let lines = cleanEscapes(plain).replacingOccurrences(of: "\u{00A0}", with: " ").components(separatedBy: "\n")
+            .map { stripTrailing($0) }
+        guard let index = messageBoxLine(lines) else { return nil }
+        let first = lines[index].trimmingCharacters(in: .whitespaces)
+        var draft = String(first.dropFirst()).trimmingCharacters(in: .whitespaces)
+        // A draft's further lines: down to the rule under Claude Code's box, or to Codex's model line.
+        let claude = first.hasPrefix("❯")
+        for next in (index + 1)..<min(lines.count, index + 60) {
+            if claude ? isRule(lines[next]) : lines[next].contains(" · ") { break }
+            let text = lines[next].trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty { draft += " " + text }
         }
         draft = draft.trimmingCharacters(in: .whitespaces)
         guard !draft.isEmpty, !draft.hasPrefix("Try \"") else { return nil }
@@ -870,13 +883,20 @@ enum PaneReader {
         return draft
     }
 
+    /// Whether two readings of a message box say the same thing: the screen joins a draft's lines with spaces and
+    /// can't tell a wrapped line from a new one, so only the words and their order count.
+    static func sameDraft(_ a: String, _ b: String) -> Bool {
+        func words(_ text: String) -> [Substring] { text.split(whereSeparator: \.isWhitespace) }
+        return words(a) == words(b)
+    }
+
     /// Whether the text after the prompt marker starts out dim (SGR 2) or grey.
     private static func isFaint(after line: String) -> Bool {
         guard let marker = line.range(of: "❯") ?? line.range(of: "›") else { return false }
         var rest = line[marker.upperBound...]
         var codes: [String] = []
-        while let first = rest.first, first == " " || first == "\u{1B}" {
-            if first == " " { rest = rest.dropFirst(); continue }
+        while let first = rest.first, first == " " || first == "\u{00A0}" || first == "\u{1B}" {
+            if first != "\u{1B}" { rest = rest.dropFirst(); continue }
             guard let end = rest.firstIndex(where: { $0.isLetter }) else { break }
             codes.append(String(rest[rest.index(rest.startIndex, offsetBy: 1)..<end]))
             rest = rest[rest.index(after: end)...]

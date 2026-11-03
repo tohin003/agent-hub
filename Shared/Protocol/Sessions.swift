@@ -48,13 +48,20 @@ nonisolated public struct SessionInfo: Codable, Sendable, Identifiable, Hashable
     public var rows: Int?
     /// Context window, plan limits, model and effort, as the agent reports them.
     public var usage: SessionUsage?
+    /// What's typed in the agent's message box on the Mac (Claude Code, Codex), such as a message the agent handed
+    /// back to edit. The phone's message box shows it.
+    public var draft: String?
+    /// Still open in this app on the Mac ("Terminal"), finishing its turn: Agent Hub takes it over after that, or
+    /// now with `session.takeOverNow`.
+    public var movingFrom: String?
 
     public init(id: String, accountId: String, provider: ProviderKind, title: String, cwd: String, createdAt: Date,
                 lastActivity: Date? = nil, state: SessionState, stateDetail: String? = nil,
                 attention: AttentionPrompt? = nil, hasWindow: Bool = false, transcriptAvailable: Bool = false,
                 model: String? = nil, permissionMode: String? = nil, gitBranch: String? = nil, runningTasks: Int = 0,
                 lastMessage: String? = nil, agentSessionId: String? = nil, columns: Int? = nil, rows: Int? = nil,
-                usage: SessionUsage? = nil) {
+                usage: SessionUsage? = nil, draft: String? = nil) {
+        self.draft = draft
         self.id = id
         self.accountId = accountId
         self.provider = provider
@@ -234,12 +241,16 @@ nonisolated public struct HistoryEntry: Codable, Sendable, Identifiable, Hashabl
     public var effort: String?
     /// Those settings in words ("auto · claude-opus-5-5 · max effort").
     public var settings: String?
-    /// Written to in the last two minutes: it's probably still open in another terminal.
+    /// Open in another terminal, as far as the hub can tell (for agents it can't ask, written to in the last two
+    /// minutes).
     public var activeElsewhere: Bool?
+    /// Open right now outside Agent Hub, as the agent itself reports (Claude Code): it can be taken over.
+    public var running: RunningElsewhere?
 
     public init(id: String, accountId: String, title: String, cwd: String?, updatedAt: Date?, sizeBytes: Int64?,
                 mode: String? = nil, model: String? = nil, effort: String? = nil, settings: String? = nil,
-                activeElsewhere: Bool? = nil) {
+                activeElsewhere: Bool? = nil, running: RunningElsewhere? = nil) {
+        self.running = running
         self.id = id
         self.accountId = accountId
         self.title = title
@@ -251,5 +262,34 @@ nonisolated public struct HistoryEntry: Codable, Sendable, Identifiable, Hashabl
         self.effort = effort
         self.settings = settings
         self.activeElsewhere = activeElsewhere
+    }
+}
+
+/// A conversation open right now outside Agent Hub, as Claude Code itself lists it (`claude agents`).
+nonisolated public struct RunningElsewhere: Codable, Sendable, Hashable {
+    public enum Kind: String, Codable, Sendable {
+        /// An interactive session in a terminal tab.
+        case terminal
+        /// A session in Claude Code's background service (`claude --bg`, its agent view).
+        case background
+    }
+
+    public var kind: Kind
+    /// Working on a turn right now: a terminal session is taken over when it finishes.
+    public var busy: Bool
+    /// A permission prompt or question there waits for an answer (Claude Code's own words, such as "input needed").
+    /// It can't be answered from here; taking over closes it.
+    public var waitingFor: String?
+    /// The app showing it, such as "Terminal" or "iTerm2" (a terminal session).
+    public var app: String?
+    /// The agent's own name for the session ("pebble-26").
+    public var name: String?
+
+    public init(kind: Kind, busy: Bool, waitingFor: String? = nil, app: String? = nil, name: String? = nil) {
+        self.kind = kind
+        self.busy = busy
+        self.waitingFor = waitingFor
+        self.app = app
+        self.name = name
     }
 }

@@ -159,6 +159,8 @@ final class BackgroundKeeper {
     func enterForeground() {
         guard player?.isPlaying == true else { return }
         player?.stop()
+        // The Mac's sound may be playing through the same session.
+        guard !MacAudioClient.isActive else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }

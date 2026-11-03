@@ -128,10 +128,12 @@ nonisolated public struct HubInfo: Codable, Sendable, Hashable {
     public var clients: Int
     /// Whether the live screen is switched on in Agent Hub (nil from an older hub: on).
     public var screenSharing: Bool?
+    /// Whether the privacy screen covers the Mac's displays (nil from an older hub, which has none).
+    public var privacyScreen: Bool?
 
     public init(macName: String, user: String, version: String, tailscaleName: String?, tailscaleIP: String?, port: Int,
                 screenRecording: Bool, accessibility: Bool, tmuxPath: String?, terminalApp: String,
-                renewal: RenewalInfo?, clients: Int, screenSharing: Bool? = nil) {
+                renewal: RenewalInfo?, clients: Int, screenSharing: Bool? = nil, privacyScreen: Bool? = nil) {
         self.macName = macName
         self.user = user
         self.version = version
@@ -145,6 +147,7 @@ nonisolated public struct HubInfo: Codable, Sendable, Hashable {
         self.renewal = renewal
         self.clients = clients
         self.screenSharing = screenSharing
+        self.privacyScreen = privacyScreen
     }
 }
 
