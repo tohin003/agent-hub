@@ -27,6 +27,12 @@ struct SessionRow: View {
                 detail
                 HStack(spacing: 6) {
                     StateChip(state: session.state)
+                    if session.agentUpdated == true {
+                        Label("Updated", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("\(session.provider.displayName) was updated. Restart it to use the new version.")
+                    }
                     if session.runningTasks > 0 {
                         Label("\(session.runningTasks)", systemImage: "gearshape.2")
                             .font(.footnote)

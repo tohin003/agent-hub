@@ -157,4 +157,10 @@ extension ClaudeStatus {
               window > 0 else { return nil }
         return (model, window)
     }
+
+    /// The model the session runs, as Claude Code names it ("claude-opus-5-5"): what `--model` takes.
+    static func modelId(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return ((json["model"] as? [String: Any])?["id"] as? String)?.nilIfEmpty
+    }
 }

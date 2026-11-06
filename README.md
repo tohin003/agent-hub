@@ -158,6 +158,9 @@ Your phone can't connect? See [Troubleshooting](#troubleshooting).
   "Type something" options take your own words; ◀ ▶ sliders move.
 - **Type to it:** the message box types into the agent's terminal. Type `/` for the agent's own slash commands.
   **+** attaches photos and files (they're copied to the Mac; their path goes into your message).
+- **After an agent updates:** sessions started before keep running the old version, which can't open files dropped
+  into their window on the Mac. They show **Updated**; **Restart** (in the session, or in the menu bar) continues the
+  same conversation in the new version, between turns.
 - **Model and effort:** tap the pill above the message box. Changes apply to this session only.
 - **Usage:** tap the ring in the toolbar.
 - **Rename, stop, show on the Mac:** the **•••** menu.
@@ -207,7 +210,11 @@ To rotate the token: delete `~/.agenthub/token`, restart the hub, then `scripts/
 - **No screen.** Allow Screen & System Audio Recording, reopen the Screen tab, and check the Live Screen switch.
 - **A screenshot dragged into a session's window doesn't attach.** Allow Full Disk Access for Agent Hub: the agent
   reads files with Agent Hub's permissions, and the floating thumbnail's file sits in a folder only Full Disk Access
-  opens.
+  opens. If it's allowed and drops still fail, the agent was updated while the session ran (an npm install of Claude
+  Code writes a new program file every time, even for the same version). macOS names a process by its program file, so
+  once that file is gone it refuses the agent's reads without looking at any permission, in Terminal too; allowing
+  access again changes nothing. The session says so (**Updated** in the app, in the menu bar, and in its window's
+  status bar): **Restart** it, and the conversation, mode and model carry on in the new version.
 - **A question isn't shown as buttons.** The Terminal view always shows it, and its keys (▲ ▼ ⏎ esc 1 2 3) answer it.
 - **An account is missing.** Agent Hub finds CLIs on your PATH, and shell functions or aliases named after an agent with
   a suffix (`claude-work() { CLAUDE_CONFIG_DIR=~/.claude-work claude "$@"; }`). You can also add one to

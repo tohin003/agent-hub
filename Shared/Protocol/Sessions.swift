@@ -54,6 +54,10 @@ nonisolated public struct SessionInfo: Codable, Sendable, Identifiable, Hashable
     /// Still open in this app on the Mac ("Terminal"), finishing its turn: Agent Hub takes it over after that, or
     /// now with `session.takeOverNow`.
     public var movingFrom: String?
+    /// The agent was updated on the Mac while it ran (its program file was replaced). It works on, but until it starts
+    /// again macOS can't tell which app it belongs to, so it can't open files a permission guards, such as a
+    /// screenshot dropped into its window. `session.restart` starts it again (Claude Code, between turns).
+    public var agentUpdated: Bool?
 
     public init(id: String, accountId: String, provider: ProviderKind, title: String, cwd: String, createdAt: Date,
                 lastActivity: Date? = nil, state: SessionState, stateDetail: String? = nil,

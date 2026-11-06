@@ -167,6 +167,8 @@ targets:
       - path: Mac/Transcripts
       - path: Mac/Sessions/PaneReader.swift
       - path: Mac/Sessions/RunningAgents.swift
+      - path: Mac/Sessions/AgentProcess.swift
+      - path: Mac/Sessions/Launcher.swift
       - path: Mac/Sessions/LogoExtractor.swift
       - path: Mac/Sessions/UsageParsing.swift
       - path: Mac/Screen/InputInjector.swift

@@ -5,6 +5,8 @@ import SwiftUI
 struct MenuPanel: View {
     @Bindable var hub: Hub
     @State private var copied = false
+    /// Why the last Restart didn't go through ("Claude Code is working…").
+    @State private var restartProblem: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -58,8 +60,20 @@ struct MenuPanel: View {
                         Text(session.title).lineLimit(1)
                         Text("\(session.accountId) · \(URL(fileURLWithPath: session.cwd).lastPathComponent)")
                             .font(.caption).foregroundStyle(.secondary)
+                        if session.agentUpdated == true {
+                            Label("\(session.provider.displayName) was updated: restart it to open dropped files",
+                                  systemImage: "arrow.triangle.2.circlepath")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                     }
                     Spacer()
+                    if session.agentUpdated == true, session.provider == .claude {
+                        Button("Restart", systemImage: "arrow.clockwise") { restart(session) }
+                            .labelStyle(.iconOnly)
+                            .buttonStyle(.borderless)
+                            .disabled(session.state == .working || session.state == .starting)
+                            .help("Restart \(session.provider.displayName) to use the new version. The conversation, mode and model carry on.")
+                    }
                     Button("Show", systemImage: "macwindow") {
                         Task { try? await hub.sessions?.window(WindowParams(sessionId: session.id, action: "focus")) }
                     }
@@ -67,6 +81,20 @@ struct MenuPanel: View {
                     .buttonStyle(.borderless)
                     .help("Show this session's window")
                 }
+            }
+            if let restartProblem {
+                Text(restartProblem).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func restart(_ session: SessionInfo) {
+        restartProblem = nil
+        Task {
+            do {
+                try await hub.sessions?.restart(session.id)
+            } catch {
+                restartProblem = (error as? WireError)?.message ?? error.localizedDescription
             }
         }
     }

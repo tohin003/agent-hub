@@ -36,6 +36,9 @@ struct SessionScreen: View {
                     AttentionCard(prompt: prompt, model: model)
                         .id(prompt.signature)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if model.session.agentUpdated == true {
+                    AgentUpdatedCard(session: model.session)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 if showingKeys || terminalMode {
                     KeyBar(model: model)
@@ -51,6 +54,7 @@ struct SessionScreen: View {
             .padding(.horizontal)
             .padding(.bottom, 6)
             .animation(.snappy, value: model.session.attention?.signature)
+            .animation(.snappy, value: model.session.agentUpdated)
         }
         .navigationTitle(model.session.title)
         .navigationSubtitle(subtitle)
