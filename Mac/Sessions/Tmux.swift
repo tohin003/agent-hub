@@ -175,12 +175,25 @@ final class Tmux {
         set -g status-style "bg=default,fg=colour245"
         set -g status-left "#[fg=colour111,bold] ◉ Agent Hub #[fg=colour245,nobold] #{@agenthub_title} "
         set -g status-left-length 120
-        set -g status-right "#[fg=colour245]#{session_name}  %H:%M "
-        set -g status-right-length 40
+        set -g status-right "\(statusRight)"
+        set -g status-right-length \(statusRightLength)
         set -g window-status-format ""
         set -g window-status-current-format ""
         set -g message-style "bg=colour236,fg=colour255"
         """
         try? config.write(toFile: HubPaths.tmuxConf, atomically: true, encoding: .utf8)
+    }
+
+    /// The right of a window's status bar: a note the hub leaves for the session (`@agenthub_note`, such as "Claude
+    /// Code was updated"), then its name and the time.
+    static let statusRight = "#{?@agenthub_note,#[fg=colour214]#{@agenthub_note}  ,}#[fg=colour245]#{session_name}  %H:%M "
+    static let statusRightLength = 120
+
+    /// Applies the status bar to a tmux server that's already running (its config file is read only when it starts),
+    /// so the hub's notes show in windows open since before.
+    func applyStatusBar() async {
+        guard await run(["has-session"]).ok else { return }
+        _ = await run(["set-option", "-g", "status-right", Self.statusRight])
+        _ = await run(["set-option", "-g", "status-right-length", String(Self.statusRightLength)])
     }
 }

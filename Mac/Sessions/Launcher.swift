@@ -115,6 +115,35 @@ enum Launcher {
                     commandLine: commandLine)
     }
 
+    /// The line typed into a session's shell to start its agent again, continuing the conversation where the agent
+    /// supports it. Claude Code also keeps the mode, model and effort the session last ran with (a resumed
+    /// conversation otherwise starts in the defaults), and the hub's own settings (hooks and status line).
+    static func restartLine(account: Account, resumeId: String?, attachedTo: String?, mode: String?, model: String?,
+                            effort: String?) -> String {
+        var words = [account.command]
+        switch account.provider {
+        case .claude where attachedTo != nil:
+            // Still running in Claude Code's background service: show it again.
+            words += ["attach", attachedTo ?? ""]
+        case .claude:
+            if let resumeId { words += ["--resume", resumeId] }
+            words += ["--settings", HubPaths.claudeSettings]
+            if let mode = mode?.nilIfEmpty { words += ["--permission-mode", mode] }
+            if let model = model?.nilIfEmpty { words += ["--model", model] }
+            if let effort = effort?.nilIfEmpty { words += ["--effort", effort] }
+        case .codex:
+            if let resumeId { words += ["resume", resumeId] }
+        case .opencode:
+            if let resumeId { words += ["--session", resumeId] }
+        case .antigravity:
+            if let resumeId { words += ["--conversation", resumeId] }
+        case .gemini, .shell, .other:
+            break
+        }
+        // The account command may itself hold several words: unquoted, like the launch script.
+        return ([words[0]] + words.dropFirst().map(Shell.quote)).joined(separator: " ")
+    }
+
     /// Shows one of Claude Code's background sessions as it runs (`claude-w attach <id>`, typed as the person would).
     /// When the hub lets go, the session carries on in Claude Code's background service.
     static func attachPlan(sessionId: String, account: Account, cwd: String, shortId: String, conversation: String,

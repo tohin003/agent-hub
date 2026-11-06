@@ -55,6 +55,10 @@ final class SessionManager {
         /// The last message-box reading checked against the screen's colours (a grey placeholder looks like text
         /// without them), reused while the screen shows the same text.
         var draftCheck: (seen: String, draft: String?, at: Date)?
+        /// The model id Claude Code's status line reports ("claude-opus-5-5"): what a restart continues with.
+        var statusModel: String?
+        /// The window's status bar says the agent was updated (tmux option `@agenthub_note`).
+        var noteShown = false
 
         init(record: Record, info: SessionInfo) {
             self.record = record
@@ -122,6 +126,7 @@ final class SessionManager {
     func start() {
         load()
         loop = Task { [weak self] in
+            await self?.tmux.applyStatusBar()
             while !Task.isCancelled {
                 await self?.tick()
                 try? await Task.sleep(for: .milliseconds(450))
@@ -792,6 +797,7 @@ final class SessionManager {
         session.statusModified = modified
         guard let data = FileManager.default.contents(atPath: path), let usage = ClaudeStatus.usage(from: data) else { return }
         if let learnt = ClaudeStatus.modelWindow(from: data) { contextWindows.learn(model: learnt.model, window: learnt.window) }
+        session.statusModel = ClaudeStatus.modelId(from: data) ?? session.statusModel
         session.statusUsage = usage
         let composed = composedUsage(session)
         guard composed != session.info.usage else { return }
@@ -825,36 +831,128 @@ final class SessionManager {
         return usage == SessionUsage() ? nil : usage
     }
 
-    /// Starts the agent again in an exited session, continuing its conversation where the agent supports it.
+    /// Starts the agent again, continuing its conversation where the agent supports it (Claude Code: with the same
+    /// mode, model and effort): in a session whose agent exited, or one whose Claude Code is between turns, such as
+    /// after it was updated on the Mac (`agentUpdated`).
     func restart(_ id: String) async throws {
-        guard let session = live[id], session.info.state == .exited,
-              let account = accounts().first(where: { $0.id == session.record.accountId }) else {
-            throw WireError.badRequest("The agent is still running.")
+        guard let session = live[id], let account = accounts().first(where: { $0.id == session.record.accountId }) else {
+            throw WireError.notFound("That session isn't on the Mac any more.")
         }
-        let resume = session.info.agentSessionId ?? session.record.agentSessionId
-        var words = [account.command]
-        switch account.provider {
-        case .claude where session.record.attachedTo != nil:
-            // Still running in Claude Code's background service: show it again.
-            words += ["attach", session.record.attachedTo ?? ""]
-        case .claude:
-            if let resume { words += ["--resume", resume] }
-            words += ["--settings", HubPaths.claudeSettings]
-        case .codex:
-            if let resume { words += ["resume", resume] }
-        case .opencode:
-            if let resume { words += ["--session", resume] }
-        case .antigravity:
-            if let resume { words += ["--conversation", resume] }
-        case .gemini, .shell, .other:
-            break
+        if session.info.state == .ended {
+            throw WireError.badRequest("That session has ended. Continue its conversation instead.")
         }
-        let line = ([words[0]] + words.dropFirst().map(Shell.quote)).joined(separator: " ")
-        session.sawAgentProcess = false
-        session.launchedAt = .now
-        session.info.state = .starting
-        onSessionChanged?(session.info)
-        await tmux.paste(session: id, text: line, submit: true)
+        // One restart at a time: a second tap mustn't type the command twice.
+        try await exclusively(id) {
+            if session.info.state != .exited { try await closeAgent(id, account: account) }
+            let line = Launcher.restartLine(account: account,
+                                            resumeId: session.info.agentSessionId ?? session.record.agentSessionId,
+                                            attachedTo: session.record.attachedTo, mode: session.info.permissionMode,
+                                            model: session.statusModel ?? session.info.model,
+                                            effort: session.info.usage?.effort)
+            session.sawAgentProcess = false
+            session.launchedAt = .now
+            session.info.state = .starting
+            session.info.agentUpdated = nil
+            onSessionChanged?(session.info)
+            if session.noteShown {
+                session.noteShown = false
+                await tmux.setOption(session: id, key: "@agenthub_note", value: "")
+            }
+            await tmux.paste(session: id, text: line, submit: true)
+            Log.info("sessions: \(id) starts \(account.id) again")
+        }
+    }
+
+    /// Closes a session's running agent so it can start again: only Claude Code (it saves the conversation and exits
+    /// on SIGTERM), and only between turns, with no question open and nothing typed in its message box.
+    private func closeAgent(_ id: String, account: Account) async throws {
+        guard let session = live[id] else { throw WireError.notFound("That session has ended.") }
+        let name = account.provider.displayName
+        guard account.provider == .claude, session.record.attachedTo == nil else {
+            throw WireError.badRequest("Quit \(name) in its window on the Mac, then start it again here.")
+        }
+        guard let pane = await tmux.listPanes().first(where: { $0.session == id }) else {
+            throw WireError.notFound("That session's terminal is gone.")
+        }
+        // Already back at the shell: nothing to close.
+        guard let agent = AgentProcess.foreground(ofShell: pane.pid) else { return }
+        if session.info.state == .starting {
+            throw WireError.badRequest("\(name) is still starting. Try again in a moment.")
+        }
+        let reading = await tmux.reading(id)
+        if reading.working || RunningAgents.isBusy(pid: agent, dataDir: account.dataDir) == true {
+            throw WireError.badRequest("\(name) is working. Restart it when this turn ends.")
+        }
+        if let open = reading.prompt, open.optional != true {
+            throw WireError.badRequest("Answer the open question first.")
+        }
+        guard await messageBoxIsEmpty(id) else {
+            throw WireError.badRequest("Something is typed in \(name)'s message box on the Mac. Send or clear it first.")
+        }
+        Darwin.kill(agent, SIGTERM)
+        for _ in 0..<50 {
+            try? await Task.sleep(for: .milliseconds(200))
+            if !RunningAgents.isAlive(agent) {
+                await waitForShell(id)
+                Log.info("sessions: \(id) closed \(name) (pid \(agent)) to start it again")
+                return
+            }
+        }
+        throw WireError.failed("\(name) didn't close. Type /exit in its window on the Mac, then start it again here.")
+    }
+
+    /// Waits until the session's shell is in front and its screen has settled (a login shell takes a moment to
+    /// start), so the line typed next lands at its prompt.
+    private func waitForShell(_ id: String) async {
+        var previous: String?
+        for _ in 0..<32 {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let pane = await tmux.listPanes().first(where: { $0.session == id }),
+                  Self.shells.contains(pane.command) else { continue }
+            let screen = await tmux.capture(sessions: [id], escapes: false)[id]
+            if screen != nil, screen == previous { return }
+            previous = screen
+        }
+    }
+
+    // MARK: Updated agents
+
+    /// What a session's foreground command is called while its shell, not the agent, is in front.
+    static let shells: Set<String> = ["zsh", "-zsh", "bash", "-bash", "sh", "fish", "login", "tmux"]
+
+    /// Flags sessions whose agent was updated on disk while it runs (its program file was replaced): until it starts
+    /// again, macOS can't tell which app it belongs to, so it can't open files a permission guards, such as a
+    /// screenshot dropped into its window. The phone shows it with a Restart button; the window's status bar says so.
+    private func checkAgentPrograms(_ ids: [String], panes: [String: PaneInfo]) async {
+        for id in ids {
+            guard let session = live[id], let pane = panes[id] else { continue }
+            var replaced: Int32?
+            if session.record.provider != .shell, session.record.provider != .other, session.record.attachedTo == nil,
+               session.info.state != .exited, let agent = AgentProcess.foreground(ofShell: pane.pid),
+               AgentProcess.programReplaced(agent) == true {
+                replaced = agent
+            }
+            let updated = replaced != nil
+            if updated != (session.info.agentUpdated == true) {
+                session.info.agentUpdated = updated ? true : nil
+                onSessionChanged?(session.info)
+                if let replaced {
+                    Log.info("sessions: \(id)'s \(session.record.provider.displayName) (pid \(replaced)) was updated on disk while it ran")
+                }
+            }
+            if updated != session.noteShown {
+                session.noteShown = updated
+                await tmux.setOption(session: id, key: "@agenthub_note",
+                                     value: updated ? Self.updatedNote(session.record.provider) : "")
+            }
+        }
+    }
+
+    /// The window's status bar, for an agent updated while it runs.
+    static func updatedNote(_ provider: ProviderKind) -> String {
+        provider == .claude
+            ? "⟳ Claude Code was updated: restart it from Agent Hub to open dropped files"
+            : "⟳ \(provider.displayName) was updated: quit and start it again to open dropped files"
     }
 
     func upload(_ params: UploadParams) throws -> UploadResult {
@@ -1022,6 +1120,8 @@ final class SessionManager {
                                           cursorY: pane.cursorY, sequence: session.terminalSequence))
             }
         }
+        // Every ~9 seconds: was an agent's program updated on disk while it runs?
+        if tickCount % 20 == 3, !running.isEmpty { await checkAgentPrograms(running, panes: paneMap) }
 
         let watched = timelineSubscribers()
         for id in order {
@@ -1054,8 +1154,7 @@ final class SessionManager {
     private func updateStatus(_ id: String, text: String, reading: PaneReader.Reading, pane: PaneInfo, draft: String?) {
         guard let session = live[id] else { return }
         var info = session.info
-        let shells: Set<String> = ["zsh", "-zsh", "bash", "-bash", "sh", "fish", "login", "tmux"]
-        let atShell = shells.contains(pane.command)
+        let atShell = Self.shells.contains(pane.command)
         if !atShell { session.sawAgentProcess = true }
         let state: SessionState
         if let prompt = reading.prompt, prompt.optional != true {
